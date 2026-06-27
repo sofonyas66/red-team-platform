@@ -1,0 +1,78 @@
+{
+  "type": "bundle",
+  "id": "bundle--eth-state-actors-001",
+  "objects": [
+    {
+      "type": "threat-actor",
+      "id": "threat-actor--cyber-horus-001",
+      "name": "Cyber_Horus",
+      "description": "Egypt-linked threat group. Conducted confirmed intrusions against Ethiopian government networks in 2020, attributed by INSA. Activity linked to geopolitical tensions over the Grand Ethiopian Renaissance Dam.",
+      "threat_actor_types": ["nation-state"],
+      "sophistication": "intermediate",
+      "resource_level": "government",
+      "primary_motivation": "ideology",
+      "sectors": ["government", "energy"],
+      "aliases": ["Horus Team"]
+    },
+    {
+      "type": "attack-pattern",
+      "id": "attack-pattern--t1566-001",
+      "name": "Spearphishing Attachment",
+      "technique_id": "T1566.001",
+      "tactic": "initial-access",
+      "description": "Sending emails with malicious attachments to targeted government officials."
+    },
+    {
+      "type": "attack-pattern",
+      "id": "attack-pattern--t1078-001",
+      "name": "Valid Accounts: Domain Accounts",
+      "technique_id": "T1078.002",
+      "tactic": "defense-evasion",
+      "description": "Using compromised domain credentials to blend in with normal activity."
+    },
+    {
+      "type": "attack-pattern",
+      "id": "attack-pattern--t1059-001",
+      "name": "Command and Scripting Interpreter: PowerShell",
+      "technique_id": "T1059.001",
+      "tactic": "execution",
+      "description": "Using PowerShell for execution and living-off-the-land."
+    },
+    {
+      "type": "attack-pattern",
+      "id": "attack-pattern--t1071-001",
+      "name": "Application Layer Protocol: Web Protocols",
+      "technique_id": "T1071.001",
+      "tactic": "command-and-control",
+      "description": "Using HTTP/HTTPS for C2 communication to blend with normal traffic."
+    },
+    {
+      "type": "relationship",
+      "id": "rel--horus-t1566",
+      "relationship_type": "uses",
+      "source_ref": "threat-actor--cyber-horus-001",
+      "target_ref": "attack-pattern--t1566-001"
+    },
+    {
+      "type": "relationship",
+      "id": "rel--horus-t1078",
+      "relationship_type": "uses",
+      "source_ref": "threat-actor--cyber-horus-001",
+      "target_ref": "attack-pattern--t1078-001"
+    },
+    {
+      "type": "relationship",
+      "id": "rel--horus-t1059",
+      "relationship_type": "uses",
+      "source_ref": "threat-actor--cyber-horus-001",
+      "target_ref": "attack-pattern--t1059-001"
+    },
+    {
+      "type": "relationship",
+      "id": "rel--horus-t1071",
+      "relationship_type": "uses",
+      "source_ref": "threat-actor--cyber-horus-001",
+      "target_ref": "attack-pattern--t1071-001"
+    }
+  ]
+}

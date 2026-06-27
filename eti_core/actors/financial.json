@@ -1,0 +1,62 @@
+{
+  "type": "bundle",
+  "id": "bundle--eth-financial-actors-001",
+  "objects": [
+    {
+      "type": "threat-actor",
+      "id": "threat-actor--eth-bec-001",
+      "name": "ETH-BEC-Cluster",
+      "description": "Cluster of financially motivated actors targeting Ethiopian banks and financial institutions through Business Email Compromise. Observed compromising procurement and finance department mailboxes for payment redirection fraud.",
+      "threat_actor_types": ["criminal"],
+      "sophistication": "intermediate",
+      "resource_level": "criminal-infrastructure",
+      "primary_motivation": "financial-gain",
+      "sectors": ["financial"]
+    },
+    {
+      "type": "attack-pattern",
+      "id": "attack-pattern--t1566-002",
+      "name": "Spearphishing Link",
+      "technique_id": "T1566.002",
+      "tactic": "initial-access",
+      "description": "Credential harvesting links targeting finance and procurement staff."
+    },
+    {
+      "type": "attack-pattern",
+      "id": "attack-pattern--t1114-002",
+      "name": "Email Collection: Remote Email Collection",
+      "technique_id": "T1114.002",
+      "tactic": "collection",
+      "description": "Extended monitoring of compromised mailboxes for payment and procurement data before executing fraud."
+    },
+    {
+      "type": "attack-pattern",
+      "id": "attack-pattern--t1036-001",
+      "name": "Masquerading",
+      "technique_id": "T1036",
+      "tactic": "defense-evasion",
+      "description": "Spoofing legitimate vendor or executive identities in email communication."
+    },
+    {
+      "type": "relationship",
+      "id": "rel--bec-t1566",
+      "relationship_type": "uses",
+      "source_ref": "threat-actor--eth-bec-001",
+      "target_ref": "attack-pattern--t1566-002"
+    },
+    {
+      "type": "relationship",
+      "id": "rel--bec-t1114",
+      "relationship_type": "uses",
+      "source_ref": "threat-actor--eth-bec-001",
+      "target_ref": "attack-pattern--t1114-002"
+    },
+    {
+      "type": "relationship",
+      "id": "rel--bec-t1036",
+      "relationship_type": "uses",
+      "source_ref": "threat-actor--eth-bec-001",
+      "target_ref": "attack-pattern--t1036-001"
+    }
+  ]
+}
