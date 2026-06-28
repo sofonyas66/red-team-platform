@@ -1,0 +1,31 @@
+{
+  "users": [
+    {"objectid": "user-hr01", "name": "hr_user01@ETHBANK.LOCAL", "enabled": true, "admincount": false},
+    {"objectid": "user-svcbackup", "name": "svc_backup@ETHBANK.LOCAL", "enabled": true, "admincount": true},
+    {"objectid": "user-admin", "name": "administrator@ETHBANK.LOCAL", "enabled": true, "admincount": true}
+  ],
+  "computers": [
+    {"objectid": "computer-ws01", "name": "WS01.ETHBANK.LOCAL", "operatingsystem": "Windows 10"},
+    {"objectid": "computer-fs01", "name": "FS01.ETHBANK.LOCAL", "operatingsystem": "Windows Server 2022"},
+    {"objectid": "computer-dc01", "name": "DC01.ETHBANK.LOCAL", "operatingsystem": "Windows Server 2022"}
+  ],
+  "groups": [
+    {"objectid": "group-domainadmins", "name": "DOMAIN ADMINS@ETHBANK.LOCAL", "admincount": true},
+    {"objectid": "group-domainusers", "name": "DOMAIN USERS@ETHBANK.LOCAL", "admincount": false}
+  ],
+  "domains": [
+    {"objectid": "domain-ethbank-001", "name": "ETHBANK.LOCAL"}
+  ],
+  "relationships": [
+    {"source": "user-hr01", "target": "group-domainusers", "type": "MemberOf"},
+    {"source": "user-hr01", "target": "user-svcbackup", "type": "GenericWrite"},
+    {"source": "user-svcbackup", "target": "computer-fs01", "type": "AdminTo"},
+    {"source": "user-svcbackup", "target": "group-domainusers", "type": "MemberOf"},
+    {"source": "user-admin", "target": "group-domainadmins", "type": "MemberOf"},
+    {"source": "computer-fs01", "target": "user-svcbackup", "type": "HasSession"},
+    {"source": "domain-ethbank-001", "target": "computer-dc01", "type": "Contains"},
+    {"source": "computer-ws01", "target": "user-hr01", "type": "HasSession"},
+    {"source": "group-domainadmins", "target": "computer-dc01", "type": "AdminTo"},
+    {"source": "group-domainadmins", "target": "computer-fs01", "type": "AdminTo"}
+  ]
+}
