@@ -1,0 +1,16 @@
+neo4j
+stix2
+torch
+torch-geometric
+node2vec
+fastapi
+uvicorn
+qdrant-client
+sentence-transformers
+anthropic
+openai
+python-dotenv
+python-multipart
+httpx
+numpy
+networkx

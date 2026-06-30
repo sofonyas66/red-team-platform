@@ -7,9 +7,18 @@ Run: python demo.py
 
 import time
 import sys
+import argparse
 from datetime import datetime
 import numpy as np
 from graph.connection import driver
+
+# Import Phase 4 modules
+try:
+    from llm.planner import generate_plan
+    PLANNER_AVAILABLE = True
+except ImportError as e:
+    PLANNER_AVAILABLE = False
+    print(f"[Warning] Planner not available: {e}")
 
 # ============================================================================
 # UTILITY FUNCTIONS
@@ -195,8 +204,14 @@ def step3_score_paths(paths):
         # Print ranked results
         print()
         for rank, sp in enumerate(scored_paths, 1):
-            risk = "HIGH" if sp["score"] > 0.7 else "MEDIUM" if sp["score"] > 0.4 else "LOW"
+            if rank == 1:
+                risk = "HIGH"
+            elif rank == 2:
+                risk = "MEDIUM"
+            else:
+                risk = "LOW"
             print(f"Rank {rank} — Score: {sp['score']:.4f}  (Risk: {risk})")
+            print("  (Score is relative — Rank 1 is the highest-probability path in this environment)")
             for j, node_name in enumerate(sp["nodes"]):
                 print(f"  {node_name}")
                 if j < len(sp["rels"]):
@@ -269,57 +284,51 @@ def step4_threat_actor_correlation(top_path):
 
 
 # ============================================================================
-# STEP 5: CAMPAIGN PLAN
+# STEP 5: CAMPAIGN PLAN (using Phase 4 RAG + Planner)
 # ============================================================================
 
-def step5_campaign_plan(top_path):
+def step5_campaign_plan(scored_paths):
     print_section("STEP 5 — CAMPAIGN PLAN")
     
-    now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    if not scored_paths:
+        print("No attack path found to generate plan.")
+        return
     
-    # Determine actor from correlation
-    actor_name = "Cyber_Horus"
-    actor_type = "State-affiliated"
-    actor_motivation = "Ideology (GERD-linked)"
-    
-    plan = f"""
+    if PLANNER_AVAILABLE:
+        print("  Generating plan via RAG + Planner...")
+        # Determine sector from threat actor correlation
+        sector = "financial"  # Could be inferred from actor targets
+        plan = generate_plan(scored_paths, sector=sector, use_llm=True)
+        print(plan)
+    else:
+        print("  [Planner not available — using basic template]")
+        # Minimal fallback
+        top_path = scored_paths[0]
+        now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        plan = f"""
 === CAMPAIGN PLAN ===
 Generated: {now}
 Target Domain: ETHBANK.LOCAL
-Emulating: {actor_name} ({actor_type})
+Method: Basic Template
 
 PHASE 1 — INITIAL ACCESS
   Technique : Spearphishing Attachment (T1566.001)
-  Objective : Compromise hr_user01@ETHBANK.LOCAL
-  Rationale : HR accounts are high-value phishing targets.
-              {actor_name} uses this as primary initial access.
+  Objective : Compromise {top_path['nodes'][0]}
 
 PHASE 2 — PRIVILEGE ESCALATION  
   Technique : Valid Accounts — Domain Accounts (T1078.002)
-  Objective : Abuse GenericWrite on svc_backup@ETHBANK.LOCAL
-              to reset credentials and take control.
-  Rationale : svc_backup has AdminTo rights on FS01.
-              This is the highest-scored path in the graph.
+  Objective : Abuse GenericWrite on {top_path['nodes'][1]}
 
 PHASE 3 — LATERAL MOVEMENT
   Technique : AdminTo abuse
-  Objective : Move from svc_backup to FS01.ETHBANK.LOCAL
-  Rationale : File server likely contains sensitive documents
-              relevant to financial sector targeting.
-
-DETECTION HYPOTHESIS:
-  - Alert on: credential reset for svc_backup outside 
-    business hours
-  - Alert on: new AdminTo session on FS01 from 
-    unexpected source
-  - Alert on: PowerShell execution on FS01
+  Objective : Move from {top_path['nodes'][1]} to {top_path['nodes'][2]}
 
 ==============================================
 Platform: Red Team Planning and Analysis Platform
 INSA Ethio Cyber Talent Program — Red Team Track
 ==============================================
-"""
-    print(plan)
+""".strip()
+        print(plan)
 
 
 # ============================================================================
@@ -327,6 +336,17 @@ INSA Ethio Cyber Talent Program — Red Team Track
 # ============================================================================
 
 def main():
+    parser = argparse.ArgumentParser(description="Red Team Planning Platform Demo")
+    parser.add_argument("--fast", action="store_true", help="Skip pauses between sections")
+    parser.add_argument("--step", type=int, choices=[1,2,3,4,5], help="Run only a specific step")
+    args = parser.parse_args()
+    
+    # Override sleep if --fast
+    if args.fast:
+        global time
+        original_sleep = time.sleep
+        time.sleep = lambda x: None
+    
     print("=" * 60)
     print("  RED TEAM PLANNING PLATFORM — DEMO")
     print("  INSA Ethio Cyber Talent Program")
@@ -336,25 +356,55 @@ def main():
     if not check_neo4j_connection():
         sys.exit(1)
     
+    steps = {
+        1: ("STEP 1 — GRAPH STATE", step1_graph_state),
+        2: ("STEP 2 — ATTACK PATH DISCOVERY", step2_attack_paths),
+        3: ("STEP 3 — GNN PATH SCORING", step3_score_paths),
+        4: ("STEP 4 — THREAT ACTOR CORRELATION", step4_threat_actor_correlation),
+        5: ("STEP 5 — CAMPAIGN PLAN", step5_campaign_plan),
+    }
+    
+    if args.step:
+        # Run single step
+        step_num = args.step
+        if step_num in steps:
+            title, func = steps[step_num]
+            if step_num == 4:
+                # Step 4 needs top_path from step 3
+                paths = step2_attack_paths()
+                scored = step3_score_paths(paths)
+                func(scored[0] if scored else None)
+            elif step_num == 5:
+                # Step 5 needs scored paths from step 3
+                paths = step2_attack_paths()
+                scored = step3_score_paths(paths)
+                func(scored)
+            else:
+                func()
+        else:
+            print(f"Unknown step: {args.step}")
+        return
+    
+    # Run all steps
     # Step 1: Graph State
     step1_graph_state()
-    time.sleep(0.5)
+    if not args.fast: time.sleep(0.5)
     
     # Step 2: Attack Path Discovery
     paths = step2_attack_paths()
-    time.sleep(0.5)
+    if not args.fast: time.sleep(0.5)
     
     # Step 3: GNN Path Scoring
     scored_paths = step3_score_paths(paths)
-    time.sleep(0.5)
+    if not args.fast: time.sleep(0.5)
     
     # Step 4: Threat Actor Correlation
     top_path = scored_paths[0] if scored_paths else None
     step4_threat_actor_correlation(top_path)
-    time.sleep(0.5)
+    if not args.fast: time.sleep(0.5)
     
     # Step 5: Campaign Plan
-    step5_campaign_plan(top_path)
+    step5_campaign_plan(scored_paths)
     
     print("\n✅ Demo complete!")
 
