@@ -39,3 +39,12 @@ Thumbs.db
 # Data (keep tracked samples, ignore large files)
 *.csv
 *.parquet
+
+# Local test/sample data — not part of the platform source
+Bloodhound-CE-Sample-Data/
+data/ingestion_log.json
+data/*.zip
+
+# Editor swap files
+*.kate-swp
+*.swp
