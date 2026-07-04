@@ -48,3 +48,8 @@ data/*.zip
 # Editor swap files
 *.kate-swp
 *.swp
+
+# Exceptions: these specific .pt files are the trained GAT model,
+# needed for portability to other machines — must be committed
+!gnn/cache/path_gat.pt
+!gnn/cache/graph_tensors.pt
