@@ -6,10 +6,10 @@ Combines GNN path scoring (Neo4j embeddings) + RAG context (Qdrant)
 """
 
 from typing import List, Dict, Any, Optional
-import numpy as np
 from graph.connection import driver
 from llm.provider import get_provider
 from llm.rag import retrieve_context
+from gnn.init_gat import score_candidate_path, get_gat_state
 
 PROMPT_TEMPLATE = """You are a red team planning assistant for INSA, Ethiopia's national cybersecurity agency. Generate a structured campaign plan.
 
@@ -28,16 +28,6 @@ Write a campaign plan with these sections:
 4. DETECTION HYPOTHESES
 
 For each phase specify: technique used, objective, rationale tied to the threat actor profile above. Keep total response under 400 words. Be specific and technical, not generic."""
-
-
-def cosine_similarity(a, b):
-    """Compute cosine similarity between two vectors."""
-    a = np.array(a, dtype=np.float32)
-    b = np.array(b, dtype=np.float32)
-    if np.linalg.norm(a) == 0 or np.linalg.norm(b) == 0:
-        return 0.0
-    return float(np.dot(a, b) / (np.linalg.norm(a) * np.linalg.norm(b)))
-
 
 def identify_threat_actor(techniques: List[str]) -> Optional[str]:
     """
@@ -62,8 +52,11 @@ def identify_threat_actor(techniques: List[str]) -> Optional[str]:
 
 def find_and_score_paths(source: str, target: str, max_hops: int = 5) -> List[Dict[str, Any]]:
     """
-    Find paths from source (User) to target (Computer) and score them using Node2Vec embeddings.
+    Find paths from source (User) to target (Computer) and score them using PathGAT.
     """
+    # Get GAT state (initializes/trains on first call)
+    _, _, _, _, _, name_to_idx = get_gat_state()
+    
     with driver.session() as session:
         # Find paths matching source and target
         # If target is specified, match by name, otherwise match any Computer
@@ -83,38 +76,18 @@ def find_and_score_paths(source: str, target: str, max_hops: int = 5) -> List[Di
         if not paths:
             return []
 
-        # Fetch all embeddings
-        emb_result = session.run("""
-            MATCH (n) WHERE n.embedding IS NOT NULL
-            RETURN 
-                coalesce(n.name, n.objectid, n.actor_id, n.technique_id) AS name,
-                n.embedding AS embedding
-        """)
-        embeddings = {record["name"]: record["embedding"] for record in emb_result}
-
         scored_paths = []
         for path in paths:
             nodes_list = path["path_nodes"]
             rels_list = path["rel_types"]
             
-            similarities = []
-            for i in range(len(nodes_list) - 1):
-                name_a = nodes_list[i]
-                name_b = nodes_list[i + 1]
-                
-                if name_a in embeddings and name_b in embeddings:
-                    sim = cosine_similarity(embeddings[name_a], embeddings[name_b])
-                    similarities.append(sim)
-                else:
-                    similarities.append(0.0)
-            
-            avg_score = np.mean(similarities) if similarities else 0.0
+            # Score using trained GAT
+            gat_score = score_candidate_path(nodes_list, rels_list, name_to_idx)
             
             scored_paths.append({
-                "score": avg_score,
+                "score": gat_score,
                 "nodes": nodes_list,
                 "rels": rels_list,
-                "similarities": similarities,
                 "hops": path["hops"]
             })
         

@@ -11,6 +11,7 @@ import argparse
 from datetime import datetime
 import numpy as np
 from graph.connection import driver
+from gnn.init_gat import get_gat_state, score_candidate_path
 
 # Import Phase 4 modules
 try:
@@ -101,126 +102,119 @@ def step1_graph_state():
 # ============================================================================
 # STEP 2: ATTACK PATH DISCOVERY
 # ============================================================================
-
 def step2_attack_paths():
     print_section("STEP 2 — ATTACK PATH DISCOVERY")
-    
-    source_name = "hr_user01@ETHBANK.LOCAL"
-    print(f"\nSource: {source_name}")
-    print("Scanning for paths to domain computers...")
-    
+
     with driver.session() as session:
-        result = session.run("""
-            MATCH p = (src:User {name: $source})-[*1..5]->(dst:Computer)
-            RETURN 
-                [n in nodes(p) | coalesce(n.name, n.objectid, n.actor_id, n.technique_id)] AS path_nodes,
-                [r in relationships(p) | type(r)] AS rel_types,
-                length(p) AS hops
-            ORDER BY hops
-            LIMIT 10
-        """, source=source_name)
-        
-        paths = list(result)
-        
-        if not paths:
-            print("\n⚠️  No paths found to Computer nodes within 5 hops")
-            return []
-        
-        print(f"\nFound {len(paths)} path(s):\n")
-        
-        for i, path in enumerate(paths, 1):
-            nodes_list = path["path_nodes"]
-            rels_list = path["rel_types"]
-            hops = path["hops"]
-            
-            print(f"Path {i} ({hops} hops):")
-            for j, node_name in enumerate(nodes_list):
-                print(f"  {node_name}")
-                if j < len(rels_list):
-                    print(f"    -[{rels_list[j]}]->")
-            print()
-        
-        return paths
+        users_result = session.run("MATCH (u:User) RETURN u.name AS name LIMIT 25")
+        users = [r["name"] for r in users_result]
 
+        comps_result = session.run("MATCH (c:Computer) RETURN c.name AS name LIMIT 25")
+        comps = [r["name"] for r in comps_result]
 
-# ============================================================================
-# STEP 3: GNN PATH SCORING
-# ============================================================================
+    if not users or not comps:
+        print("No users or computers found in graph.")
+        return []
 
+    print(f"Available users: {', '.join(users[:5])}{'...' if len(users) > 5 else ''}")
+    print("Scanning for a connected source/target pair...")
+
+    query = """
+        MATCH p = (src:User {name: $source})-[*1..5]->(dst:Computer {name: $target})
+        RETURN
+            [n in nodes(p) | coalesce(n.name, n.objectid)] AS path_nodes,
+            [r in relationships(p) | type(r)] AS rel_types,
+            length(p) AS hops
+        ORDER BY hops
+        LIMIT 10
+    """
+
+    paths = []
+    source_name = None
+    target_name = None
+
+    with driver.session() as session:
+        # Try each user/computer pair until we find one with an actual path.
+        # (The graph is real AD data — not every user has a path to every
+        # computer, so we can't just grab the first of each.)
+        for candidate_source in users:
+            for candidate_target in comps:
+                result = session.run(query, source=candidate_source, target=candidate_target)
+                found = list(result)
+                if found:
+                    source_name = candidate_source
+                    target_name = candidate_target
+                    paths = found
+                    break
+            if paths:
+                break
+
+    if not paths:
+        print("\n⚠️  No paths found between any User and Computer within 5 hops")
+        return []
+
+    print(f"Source: {source_name}")
+    print(f"Target: {target_name}")
+    print(f"\nFound {len(paths)} path(s):\n")
+
+    for i, path in enumerate(paths, 1):
+        nodes_list = path["path_nodes"]
+        rels_list = path["rel_types"]
+        hops = path["hops"]
+
+        print(f"Path {i} ({hops} hops):")
+        for j, node_name in enumerate(nodes_list):
+            print(f"  {node_name}")
+            if j < len(rels_list):
+                print(f"    -[{rels_list[j]}]->")
+        print()
+
+    return paths
 def step3_score_paths(paths):
     print_section("STEP 3 — GNN PATH SCORING")
-    
+
     if not paths:
         print("No paths to score.")
         return []
-    
-    print("Scoring paths by structural similarity...")
-    
-    with driver.session() as session:
-        # Fetch all embeddings at once
-        emb_result = session.run("""
-            MATCH (n) WHERE n.embedding IS NOT NULL
-            RETURN 
-                coalesce(n.name, n.objectid, n.actor_id, n.technique_id) AS name,
-                n.embedding AS embedding
-        """)
-        
-        # Build name -> embedding lookup
-        embeddings = {}
-        for record in emb_result:
-            embeddings[record["name"]] = record["embedding"]
-        
-        print(f"  Loaded {len(embeddings)} node embeddings")
-        
-        # Score each path
-        scored_paths = []
-        for path in paths:
-            nodes_list = path["path_nodes"]
-            rels_list = path["rel_types"]
-            
-            similarities = []
-            for i in range(len(nodes_list) - 1):
-                name_a = nodes_list[i]
-                name_b = nodes_list[i + 1]
-                
-                if name_a in embeddings and name_b in embeddings:
-                    sim = cosine_similarity(embeddings[name_a], embeddings[name_b])
-                    similarities.append(sim)
-                else:
-                    similarities.append(0.0)
-            
-            avg_score = np.mean(similarities) if similarities else 0.0
-            
-            scored_paths.append({
-                "score": avg_score,
-                "nodes": nodes_list,
-                "rels": rels_list,
-                "similarities": similarities
-            })
-        
-        # Sort by score descending
-        scored_paths.sort(key=lambda x: x["score"], reverse=True)
-        
-        # Print ranked results
-        print()
-        for rank, sp in enumerate(scored_paths, 1):
-            if rank == 1:
-                risk = "HIGH"
-            elif rank == 2:
-                risk = "MEDIUM"
-            else:
-                risk = "LOW"
-            print(f"Rank {rank} — Score: {sp['score']:.4f}  (Risk: {risk})")
-            print("  (Score is relative — Rank 1 is the highest-probability path in this environment)")
-            for j, node_name in enumerate(sp["nodes"]):
-                print(f"  {node_name}")
-                if j < len(sp["rels"]):
-                    sim = sp["similarities"][j]
-                    print(f"    -[{sp['rels'][j]}]->  (cosine: {sim:.4f})")
-            print()
-        
-        return scored_paths
 
+    print("Scoring paths with PathGAT (trained on domain-informed edge severity)...")
+
+    # Ensures model/tensors are loaded once, shared with Step 5's planner call
+    model, x, edge_index, edge_type, edge_type_names, name_to_idx = get_gat_state()
+    print(f"  Loaded GAT model — {len(name_to_idx)} nodes, {edge_index.shape[1]} edges")
+
+    scored_paths = []
+    for path in paths:
+        nodes_list = path["path_nodes"]
+        rels_list = path["rel_types"]
+
+        score = score_candidate_path(nodes_list, rels_list, name_to_idx)
+
+        scored_paths.append({
+            "score": score,
+            "nodes": nodes_list,
+            "rels": rels_list,
+        })
+
+    scored_paths.sort(key=lambda x: x["score"], reverse=True)
+
+    print()
+    for rank, sp in enumerate(scored_paths, 1):
+        if rank == 1:
+            risk = "HIGH"
+        elif rank == 2:
+            risk = "MEDIUM"
+        else:
+            risk = "LOW"
+        print(f"Rank {rank} — GAT Score: {sp['score']:.4f}  (Risk: {risk})")
+        print("  (Score = learned attention weight x predicted edge severity, averaged over hops)")
+        for j, node_name in enumerate(sp["nodes"]):
+            print(f"  {node_name}")
+            if j < len(sp["rels"]):
+                print(f"    -[{sp['rels'][j]}]->")
+        print()
+
+    return scored_paths
 
 # ============================================================================
 # STEP 4: THREAT ACTOR CORRELATION

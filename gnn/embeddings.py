@@ -112,8 +112,8 @@ def build_pyg_data(G, node_to_idx):
     return data
 
 
-def run_node2vec(data, dimensions=128, walk_length=30, num_walks=200, 
-                 p=1.0, q=1.0, batch_size=128, epochs=10, lr=0.01):
+def run_node2vec(data, dimensions=128, walk_length=20, num_walks=80,
+                 p=1.0, q=1.0, batch_size=256, epochs=8, lr=0.01):
     """Train Node2Vec using PyTorch Geometric."""
     print(f"Running Node2Vec (dimensions={dimensions}, walk_length={walk_length}, "
           f"num_walks={num_walks}, epochs={epochs})...")
@@ -125,9 +125,9 @@ def run_node2vec(data, dimensions=128, walk_length=30, num_walks=200,
         data.edge_index,
         embedding_dim=dimensions,
         walk_length=walk_length,
-        context_size=10,
+        context_size=8,
         walks_per_node=num_walks,
-        num_negative_samples=1,
+        num_negative_samples=3,
         p=p,
         q=q,
         sparse=True
@@ -148,7 +148,7 @@ def run_node2vec(data, dimensions=128, walk_length=30, num_walks=200,
             optimizer.step()
             total_loss += loss.item()
         
-        if epoch % 5 == 0 or epoch == 1 or epoch == epochs:
+        if epoch % 1 == 0 or epoch == 1 or epoch == epochs:
             print(f"  Epoch {epoch:3d}/{epochs} — Loss: {total_loss:.4f}")
     
     # Get embeddings for all nodes

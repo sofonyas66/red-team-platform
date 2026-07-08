@@ -11,6 +11,7 @@ SCHEMA = [
     "CREATE CONSTRAINT domain_id IF NOT EXISTS FOR (d:Domain) REQUIRE d.objectid IS UNIQUE",
     "CREATE CONSTRAINT gpo_id IF NOT EXISTS FOR (g:GPO) REQUIRE g.objectid IS UNIQUE",
     "CREATE CONSTRAINT ou_id IF NOT EXISTS FOR (o:OU) REQUIRE o.objectid IS UNIQUE",
+    "CREATE CONSTRAINT container_id IF NOT EXISTS FOR (c:Container) REQUIRE c.objectid IS UNIQUE",
     "CREATE CONSTRAINT actor_id IF NOT EXISTS FOR (a:ThreatActor) REQUIRE a.actor_id IS UNIQUE",
     "CREATE CONSTRAINT technique_id IF NOT EXISTS FOR (t:Technique) REQUIRE t.technique_id IS UNIQUE",
     "CREATE CONSTRAINT sector_id IF NOT EXISTS FOR (s:Sector) REQUIRE s.name IS UNIQUE",
@@ -19,6 +20,7 @@ SCHEMA = [
     "CREATE INDEX user_name IF NOT EXISTS FOR (u:User) ON (u.name)",
     "CREATE INDEX computer_name IF NOT EXISTS FOR (c:Computer) ON (c.name)",
     "CREATE INDEX group_name IF NOT EXISTS FOR (g:Group) ON (g.name)",
+    "CREATE INDEX container_name IF NOT EXISTS FOR (c:Container) ON (c.name)",
     "CREATE INDEX technique_name IF NOT EXISTS FOR (t:Technique) ON (t.name)",
 ]
 
