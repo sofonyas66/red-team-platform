@@ -1,33 +1,68 @@
 services:
   neo4j:
     image: neo4j:latest
+    container_name: ${PROJECT_NAME:-red-team-platform}-neo4j
     ports:
-      - "7474:7474"
-      - "7687:7687"
+      - "${NEO4J_HTTP_PORT:-7474}:7474"
+      - "${NEO4J_BOLT_PORT:-7687}:7687"
     environment:
-      NEO4J_AUTH: neo4j/changeme
+      NEO4J_AUTH: ${NEO4J_USER:-neo4j}/${NEO4J_PASSWORD:-changeme}
+      NEO4J_dbms_memory_heap_initial__size: 512m
+      NEO4J_dbms_memory_heap_max__size: 2g
+      NEO4J_dbms_memory_pagecache_size: 1g
     volumes:
       - neo4j_data:/data
+      - neo4j_logs:/logs
+      - neo4j_import:/var/lib/neo4j/import
     restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "cypher-shell", "-u", "${NEO4J_USER:-neo4j}", "-p", "${NEO4J_PASSWORD:-changeme}", "RETURN 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 30s
 
   qdrant:
     image: qdrant/qdrant:latest
+    container_name: ${PROJECT_NAME:-red-team-platform}-qdrant
     ports:
-      - "6333:6333"
+      - "${QDRANT_HTTP_PORT:-6333}:6333"
+      - "${QDRANT_GRPC_PORT:-6334}:6334"
     volumes:
       - qdrant_data:/qdrant/storage
     restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:6333/healthz"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 10s
 
   # ollama:
   #   image: ollama/ollama:latest
+  #   container_name: ${PROJECT_NAME:-red-team-platform}-ollama
   #   ports:
-  #     - "11434:11434"
+  #     - "${OLLAMA_PORT:-11434}:11434"
   #   volumes:
   #     - ollama_data:/root/.ollama
   #   restart: unless-stopped
   #   # Uncomment this service + set LLM_PROVIDER=ollama in .env
   #   # to run fully offline once on appropriate hardware
+  #   # deploy:
+  #   #   resources:
+  #   #     reservations:
+  #   #       devices:
+  #   #         - driver: nvidia
+  #   #           count: 1
+  #           capabilities: [gpu]
 
 volumes:
   neo4j_data:
+  neo4j_logs:
+  neo4j_import:
   qdrant_data:
+  # ollama_data:
+
+networks:
+  default:
+    name: ${PROJECT_NAME:-red-team-platform}-network

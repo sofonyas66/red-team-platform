@@ -8,16 +8,38 @@ This script:
 3. Configures graph constraints and search indexes in Neo4j.
 4. Loads the ETI-Core STIX 2.1 Threat Intel actors and techniques.
 5. Populates the Qdrant vector database with embedded threat intelligence.
+
+Usage: python bootstrap.py
+Environment variables (from .env):
+  NEO4J_URI, NEO4J_USER, NEO4J_PASSWORD
+  QDRANT_URL
 """
 
+import os
 import socket
 import subprocess
 import sys
 import time
+from pathlib import Path
 
-# Target hosts and ports
-NEO4J_HOST, NEO4J_PORT = "127.0.0.1", 7687
-QDRANT_HOST, QDRANT_PORT = "127.0.0.1", 6333
+# Load .env file if present
+try:
+    from dotenv import load_dotenv
+    load_dotenv()
+except ImportError:
+    pass
+
+# Target hosts and ports from environment
+NEO4J_URI = os.getenv("NEO4J_URI", "bolt://localhost:7687")
+NEO4J_HOST = NEO4J_URI.replace("bolt://", "").replace("neo4j://", "").split(":")[0]
+NEO4J_PORT = int(NEO4J_URI.split(":")[-1])
+
+QDRANT_URL = os.getenv("QDRANT_URL", "http://localhost:6333")
+QDRANT_HOST = QDRANT_URL.replace("http://", "").replace("https://", "").split(":")[0]
+QDRANT_PORT = int(QDRANT_URL.split(":")[-1].split("/")[0])
+
+COMPOSE_FILE = os.getenv("COMPOSE_FILE", "docker-compose.yml")
+COMPOSE_CMD = os.getenv("COMPOSE_CMD", "docker compose")  # docker compose, docker-compose, podman compose
 
 
 def check_port(host: str, port: int) -> bool:
@@ -31,62 +53,120 @@ def check_port(host: str, port: int) -> bool:
             return False
 
 
+def check_http_health(url: str) -> bool:
+    """Check HTTP health endpoint."""
+    try:
+        import urllib.request
+        req = urllib.request.Request(url, method="GET")
+        with urllib.request.urlopen(req, timeout=5) as response:
+            return response.status == 200
+    except Exception:
+        return False
+
+
+def run_compose_command(*args, check=True, capture=False):
+    """Run a docker-compose command."""
+    cmd = COMPOSE_CMD.split() + ["-f", COMPOSE_FILE] + list(args)
+    try:
+        if capture:
+            result = subprocess.run(cmd, capture_output=True, text=True, check=check)
+            return result.stdout.strip()
+        else:
+            subprocess.run(cmd, check=check)
+            return True
+    except subprocess.CalledProcessError as e:
+        if check:
+            print(f"[-] Command failed: {' '.join(cmd)}")
+            if e.stderr:
+                print(f"    Error: {e.stderr.strip()}")
+        return False
+    except FileNotFoundError:
+        print(f"[-] Compose command not found: {COMPOSE_CMD}")
+        print("    Tried: docker compose, docker-compose, podman compose")
+        return False
+
+
 def start_docker_services():
-    """Start neo4j and qdrant containers using Docker."""
+    """Start neo4j and qdrant containers using Docker/Podman Compose."""
     print("[*] Checking database infrastructure...")
-    
+
     neo4j_up = check_port(NEO4J_HOST, NEO4J_PORT)
     qdrant_up = check_port(QDRANT_HOST, QDRANT_PORT)
-    
+
     if neo4j_up and qdrant_up:
         print("[+] Neo4j and Qdrant are already running.")
-        return
+        return True
 
     print("[*] Starting Neo4j and Qdrant containers...")
-    try:
-        # Attempt to start the containers
-        subprocess.run(["docker", "start", "neo4j", "qdrant"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-    except FileNotFoundError:
-        print("[-] Docker command not found. Please ensure Docker is running and Neo4j/Qdrant are online.")
-        sys.exit(1)
+    if not run_compose_command("up", "-d", "--remove-orphans"):
+        print("[-] Failed to start containers. Is Docker/Podman running?")
+        print("    Try: systemctl --user start podman.socket  (for Podman on Linux)")
+        return False
 
     # Wait for ports to become active
-    retries = 20
+    retries = 30
     for i in range(retries):
         neo4j_up = check_port(NEO4J_HOST, NEO4J_PORT)
         qdrant_up = check_port(QDRANT_HOST, QDRANT_PORT)
         if neo4j_up and qdrant_up:
             print("[+] Database containers online and ports open.")
-            break
+            return True
         print(f"[*] Waiting for database ports (retry {i+1}/{retries})...")
         time.sleep(2)
-    else:
-        print("[-] Timed out waiting for Neo4j/Qdrant to bind ports. Check container logs.")
-        sys.exit(1)
+
+    print("[-] Timed out waiting for Neo4j/Qdrant to bind ports. Check container logs.")
+    return False
 
 
-def main():
-    print("=" * 60)
-    print(" ETHIO-RTAP Platform Bootstrapper ")
-    print("=" * 60)
-
-    # 1. Start databases
-    start_docker_services()
-
-    # Wait for engine initialization (Neo4j can take a few seconds after port opens)
+def wait_for_neo4j_engine():
+    """Wait for Neo4j internal engine to be responsive."""
     print("[*] Waiting for Neo4j internal engine to become responsive...")
     from graph.connection import driver
-    retries = 15
+
+    retries = 30
     for i in range(retries):
         try:
             with driver.session() as s:
                 s.run("RETURN 1")
             print("[+] Neo4j engine is ready.")
-            break
-        except Exception:
+            return True
+        except Exception as e:
+            if i == retries - 1:
+                print(f"[-] Could not establish Neo4j session: {e}")
+                print("    Verify credentials: NEO4J_USER / NEO4J_PASSWORD")
+                return False
             time.sleep(2)
-    else:
-        print("[-] Could not establish a Neo4j session. Please verify credentials/connection.")
+    return False
+
+
+def wait_for_qdrant():
+    """Wait for Qdrant to be fully ready."""
+    print("[*] Waiting for Qdrant to be ready...")
+    retries = 30
+    for i in range(retries):
+        if check_http_health(f"{QDRANT_URL}/healthz") or check_http_health(f"{QDRANT_URL}/"):
+            print("[+] Qdrant is ready.")
+            return True
+        print(f"[*] Waiting for Qdrant (retry {i+1}/{retries})...")
+        time.sleep(2)
+    print("[-] Qdrant not ready after timeout.")
+    return False
+
+
+def main():
+    print("=" * 60)
+    print(" ETHIO-RTAP Platform Bootstrapper")
+    print("=" * 60)
+
+    # 1. Start databases
+    if not start_docker_services():
+        sys.exit(1)
+
+    # Wait for engine initialization
+    if not wait_for_neo4j_engine():
+        sys.exit(1)
+
+    if not wait_for_qdrant():
         sys.exit(1)
 
     # 2. Schema creation
@@ -109,13 +189,15 @@ def main():
     print("=" * 60)
     print("\nNext Steps:")
     print("  1. Ingest Active Directory SharpHound ZIP using the CLI:")
-    print("     $ ./rtap ingest bloodhound <path_to_zip>")
+    print("     $ ./run.sh up")
+    print("     $ python -m cli.main auth login --username admin")
+    print("     $ python -m cli.main ingest bloodhound <path_to_zip>")
     print("  2. Train GNN embeddings on the ingested network topology:")
     print("     $ python -m gnn.embeddings")
     print("  3. Start the API server:")
     print("     $ python start_api.py")
     print("  4. Generate campaign playbooks:")
-    print("     $ ./rtap plan generate <source_user> <target_computer>")
+    print("     $ python -m cli.main plan generate <source_user> <target_computer>")
     print("=" * 60)
 
 
