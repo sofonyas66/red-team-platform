@@ -1,0 +1,42 @@
+[build-system]
+requires = ["setuptools>=61.0.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "red-team-platform"
+version = "1.0.0"
+description = "ETHIO-RTAP Red Team Planning Platform"
+readme = "README.md"
+requires-python = ">=3.10"
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "Operating System :: OS Independent",
+]
+dependencies = [
+    "neo4j",
+    "stix2",
+    "torch",
+    "torch-geometric",
+    "node2vec",
+    "fastapi",
+    "uvicorn",
+    "qdrant-client",
+    "sentence-transformers",
+    "anthropic",
+    "openai",
+    "python-dotenv",
+    "python-multipart",
+    "httpx",
+    "numpy",
+    "networkx",
+    "typer",
+    "rich",
+    "pyjwt",
+    "slowapi"
+]
+
+[project.scripts]
+rtap = "cli.main:app"
+
+[tool.setuptools]
+packages = ["cli", "api", "eti_core", "etl", "gnn", "graph", "llm"]

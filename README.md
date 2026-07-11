@@ -1,154 +1,57 @@
-# Red Team Planning and Analysis Platform
-> **Automated Attack Path Discovery, GNN Risk Scoring, and AI-Driven Campaign Generation**
+# ETHIO-RTAP — Red Team Planning & Analysis Platform
+
+> **AI-Powered Attack Path Discovery, GNN Risk Scoring & Campaign Generation**
 >
 > *Developed for the INSA Ethio Cyber Talent Program — Red Team Track*
 
 ---
 
-## 📋 Overview
+## Overview
 
-The **Red Team Planning and Analysis Platform** is an enterprise-grade AI-powered cyber security solution designed to model Active Directory (AD) environments, discover lateral movement paths, score traversal risk using Graph Neural Networks (GNNs), correlate vulnerability paths with real-world threat actors, and generate actionable campaign plans.
+ETHIO-RTAP is an enterprise-grade red team planning platform that models Active Directory environments, discovers lateral movement attack paths, scores traversal risk using Graph Neural Networks, correlates paths with real-world threat actors, and generates actionable campaign playbooks using LLMs.
 
-By uniting **Neo4j** (knowledge graph database), **Qdrant** (vector store database), **PyTorch Geometric** (structural graph embeddings), and **Advanced LLMs** (Anthropic, OpenAI, Gemini, OpenRouter, or local Ollama), this platform enables automated security assessments and red team emulation planning.
-
----
-
-## 🏗️ Architecture & Data Flow
-
-The platform executes an end-to-end pipeline that transforms raw configuration exports and threat intelligence feeds into ready-to-execute red team campaign manuals.
-
-```
-+------------------------+      +--------------------------+
-|  BloodHound AD JSON    |      |  STIX 2.1 Intel Bundles  |
-+-----------+------------+      +------------+-------------+
-            |                                |
-            | (etl/bloodhound.py)            | (eti_core/loader.py)
-            +----------------+---------------+
-                             |
-                             ▼
-                   +-------------------+
-                   |    Neo4j Graph    | <---+ (graph/schema.py)
-                   +---------+---------+
-                             |
-         +-------------------+-------------------+
-         |                                       |
-         ▼ (gnn/embeddings.py)                   ▼ (llm/rag.py)
-  +--------------+                        +--------------+
-  |  Node2Vec    |                        |  Qdrant      |
-  |  Embeddings  |                        |  Vector DB   |
-  +------+-------+                        +------+-------+
-         |                                       |
-         ▼ (llm/planner.py)                      |
-  +--------------+                               |
-  |  Attack Path |                               |
-  |  GNN Scoring |                               |
-  +------+-------+                               |
-         |                                       |
-         +-------------------+-------------------+
-                             |
-                             ▼
-                    +------------------+
-                    |  LLM Planner     | (llm/provider.py)
-                    +--------+---------+
-                             |
-                             ▼
-                    +------------------+
-                    |  Campaign Plan   | (FastAPI / CLI)
-                    +------------------+
-```
-
-### The 5-Step Pipeline:
-1. **Graph Ingestion**: Merges Active Directory structure (users, groups, computers, domains) with External Threat Intelligence Core (ETI-Core) threat actors, techniques, and target sectors into a single Neo4j database.
-2. **GNN Representation Learning**: Runs a PyTorch Geometric-based **Node2Vec** representation model to train 128-dimensional structural embeddings for every node in the graph, which are saved directly back to Neo4j.
-3. **Attack Path Scoring**: Finds candidate paths from a compromised source to critical assets and scores each transition based on the cosine similarity of their learned structural node embeddings.
-4. **Threat Intelligence RAG**: Scopes technique signatures to the most relevant Threat Actors, embeds threat profiles via SentenceTransformers (`all-MiniLM-L6-v2`), and queries Qdrant vector database for specialized emulation details.
-5. **AI Campaign Planner**: Integrates scored paths, threat actor profiles, and retrieved context to output a comprehensive campaign playbook via an LLM.
+The platform combines:
+- **Neo4j** — Knowledge graph database for AD topology and threat intelligence
+- **Qdrant** — Vector store for semantic threat intelligence retrieval (RAG)
+- **PyTorch Geometric** — Node2Vec structural embeddings for GNN-based risk scoring
+- **LLM Integration** — Campaign plan generation via Gemini, OpenAI, Anthropic, or local Ollama
 
 ---
 
-## 📁 Project Directory Structure
-
-```
-red-team-platform/
-│
-├── graph/                  # Graph Database Layer
-│   ├── __init__.py
-│   ├── connection.py       # Neo4j Driver Connection Setup
-│   └── schema.py           # Database Constraints and Indexes
-│
-├── eti_core/               # Threat Intelligence Module
-│   ├── __init__.py
-│   ├── loader.py           # STIX 2.1 Parser and Graph Ingester
-│   └── actors/             # STIX 2.1 Threat Actor JSON Bundles
-│       ├── financial.json
-│       └── state_affiliated.json
-│
-├── etl/                    # Extraction and Ingestion Pipelines
-│   ├── __init__.py
-│   └── bloodhound.py       # BloodHound JSON AD Ingestion
-│
-├── gnn/                    # Graph Representation Learning
-│   ├── __init__.py
-│   └── embeddings.py       # PyTorch Geometric Node2Vec Embeddings Generator
-│
-├── llm/                    # Language Model Reasoning Layer
-│   ├── __init__.py
-│   ├── provider.py         # Modular LLM Abstraction Client (OpenAI, Gemini, Anthropic, Ollama)
-│   ├── rag.py              # Qdrant Vector Store Setup and Context Retriever
-│   └── planner.py          # AI Campaign Planner Orchestration
-│
-├── api/                    # REST API Layer
-│   ├── __init__.py
-│   └── main.py             # FastAPI REST Server
-│
-├── data/
-│   └── sample/
-│       └── bloodhound_sample.json # Sample AD environment data for testing
-│
-├── .env                    # System Configuration Settings
-├── Dockerfile              # Docker Container Build File
-├── docker-compose.yml      # Multi-Container Deployment Configuration
-├── requirements.txt        # Python Packages and Dependencies
-└── README.md               # System Documentation (This file)
-```
-
----
-
-## ⚙️ Configuration & Setup
+## Quick Start
 
 ### Prerequisites
-- Python 3.10 or 3.11
-- Docker and Docker Compose (recommended)
 
-### 1. Database Infrastructure Setup
-You can spin up both Neo4j and Qdrant containers in one command:
+- **Python 3.10+**
+- **Docker** and **Docker Compose**
+- At least one LLM API key (Gemini, OpenAI, Anthropic, or OpenRouter) — *or* a local Ollama instance
+
+### 1. Clone & Install
 
 ```bash
-docker compose up -d
+git clone <repository-url>
+cd red-team-platform
+
+python3 -m venv venv
+source venv/bin/activate
+pip install -e .
 ```
 
-This starts:
-- **Neo4j** on `bolt://localhost:7687` and browser portal on `http://localhost:7474` (Credentials: `neo4j` / `changeme`)
-- **Qdrant** vector database on `http://localhost:6333`
-- **FastAPI API Server** on `http://localhost:8000`
+### 2. Configure Environment
 
----
-
-### 2. Environment Settings
-Create or update the `.env` file in the project root directory:
+Create or update the `.env` file in the project root:
 
 ```env
-# === LLM Configuration ===
-# Provider Options: "api" (cloud APIs) or "ollama" (local engine)
+# LLM Provider: "api" (cloud) or "ollama" (local)
 LLM_PROVIDER=api
 
-# Cloud API Keys (Set at least one if LLM_PROVIDER=api)
-ANTHROPIC_API_KEY=your_anthropic_key_here
-OPENAI_API_KEY=your_openai_key_here
-OPENROUTER_API_KEY=your_openrouter_key_here
-GEMINI_API_KEY=your_gemini_key_here
+# Set at least one API key if using cloud LLMs
+GEMINI_API_KEY=your_key_here
+ANTHROPIC_API_KEY=your_key_here
+OPENAI_API_KEY=your_key_here
+OPENROUTER_API_KEY=your_key_here
 
-# === Database Infrastructure ===
+# Database connections (defaults work with docker-compose)
 NEO4J_URI=bolt://localhost:7687
 NEO4J_USER=neo4j
 NEO4J_PASSWORD=changeme
@@ -156,164 +59,294 @@ QDRANT_HOST=localhost
 QDRANT_PORT=6333
 ```
 
----
+### 3. Bootstrap the Platform
 
-### 3. Local Python Environment Setup
-If running the scripts directly on your host machine, build the virtual environment:
+Start databases, initialize the schema, load threat intelligence, and populate the vector store — all in one command:
 
 ```bash
-# Create virtual environment
-python3 -m venv venv
-source venv/bin/activate
+docker compose up -d        # Start Neo4j + Qdrant containers
+python bootstrap.py         # Initialize everything
+```
 
-# Install dependencies
-pip install -r requirements.txt
+### 4. Ingest Your Active Directory Data
+
+Upload a BloodHound/SharpHound `.zip` export:
+
+```bash
+rtap auth login --username admin
+rtap ingest bloodhound <path/to/sharphound_export.zip>
+```
+
+### 5. Train GNN Embeddings
+
+Generate Node2Vec structural embeddings for risk scoring:
+
+```bash
+python -m gnn.embeddings
+```
+
+### 6. Start the API Server
+
+```bash
+python start_api.py
+```
+
+The API will be available at `http://localhost:8000`. Interactive docs at `http://localhost:8000/docs`.
+
+### 7. Use the CLI
+
+```bash
+rtap paths "USER@DOMAIN.LOCAL" "TARGET_COMPUTER.DOMAIN.LOCAL"
+rtap plan generate "USER@DOMAIN.LOCAL" "TARGET_COMPUTER.DOMAIN.LOCAL"
 ```
 
 ---
 
-## 🚀 Execution Guide
+## Architecture
 
-### Option A: End-to-End Demonstration Script
-To verify the entire environment and view a complete run (Graph stats -> Attack paths -> GNN scoring -> Threat Intel correlation -> Campaign generation), run the demo script:
-
-```bash
-python demo.py
 ```
-*Note: Use `--fast` flag to skip section-by-section sleep timers.*
+┌──────────────────────┐     ┌──────────────────────────┐
+│ BloodHound/SharpHound│     │ STIX 2.1 Threat Intel    │
+│ AD Export (.zip)      │     │ Bundles (eti_core/)      │
+└──────────┬───────────┘     └────────────┬─────────────┘
+           │                              │
+           │  etl/bloodhound.py           │  eti_core/loader.py
+           └──────────┬──────────────┬────┘
+                      │              │
+                      ▼              ▼
+              ┌──────────────────────────┐
+              │       Neo4j Graph        │
+              │  (Users, Groups, Comps,  │
+              │   Actors, Techniques)    │
+              └────────┬─────────┬───────┘
+                       │         │
+          ┌────────────┘         └────────────┐
+          ▼                                   ▼
+   ┌─────────────┐                     ┌─────────────┐
+   │  Node2Vec   │                     │   Qdrant    │
+   │  GNN Model  │                     │ Vector DB   │
+   │  (PyG)      │                     │ (RAG)       │
+   └──────┬──────┘                     └──────┬──────┘
+          │                                   │
+          └────────────┬──────────────────────┘
+                       ▼
+              ┌──────────────────┐
+              │   LLM Planner    │
+              │  (Campaign Gen)  │
+              └────────┬─────────┘
+                       ▼
+              ┌──────────────────┐
+              │  rtap CLI / API  │
+              └──────────────────┘
+```
+
+### Pipeline Steps
+
+| Step | Component | Description |
+|------|-----------|-------------|
+| 1 | **Graph Ingestion** | Merges AD topology with STIX 2.1 threat actors/techniques into Neo4j |
+| 2 | **GNN Training** | Node2Vec generates 128-dim structural embeddings for every graph node |
+| 3 | **Path Scoring** | Discovers attack paths and scores each hop using GNN embedding similarity |
+| 4 | **Threat Intel RAG** | Retrieves relevant threat actor context from Qdrant via semantic search |
+| 5 | **Campaign Planning** | LLM synthesizes paths + threat intel into an actionable campaign playbook |
 
 ---
 
-### Option B: Step-by-Step Command Line Pipeline
+## Project Structure
 
-#### Step 1: Initialize Database Schema
-Create labels, uniqueness constraints, and search indexes in Neo4j:
-```bash
-python graph/schema.py
 ```
-
-#### Step 2: Load Threat Intelligence Data
-Ingest STIX 2.1 threat profiles (actors, techniques, tactics, target sectors) from `eti_core/actors/`:
-```bash
-python eti_core/loader.py
-```
-
-#### Step 3: Ingest Active Directory Data
-Load your BloodHound JSON network export into the graph database:
-```bash
-python etl/bloodhound.py data/sample/bloodhound_sample.json
-```
-
-#### Step 4: Run GNN Node2Vec Training
-Train structural node embeddings for all AD systems and threat techniques:
-```bash
-python gnn/embeddings.py
-```
-
-#### Step 5: Index Threat Intelligence in Qdrant Vector Store
-Generate vector embeddings for all threat intelligence descriptions and store them in Qdrant:
-```bash
-python llm/rag.py
+red-team-platform/
+├── api/                    # FastAPI REST backend
+│   ├── main.py             #   Endpoint definitions
+│   └── auth.py             #   JWT authentication
+│
+├── cli/                    # rtap CLI client
+│   └── main.py             #   Typer command definitions
+│
+├── eti_core/               # Threat Intelligence module
+│   ├── loader.py           #   STIX 2.1 parser & Neo4j ingester
+│   └── actors/             #   Threat actor JSON bundles
+│       ├── financial.json
+│       └── state_affiliated.json
+│
+├── etl/                    # Data ingestion pipelines
+│   └── bloodhound.py       #   SharpHound ZIP → Neo4j
+│
+├── gnn/                    # Graph Neural Network layer
+│   ├── embeddings.py       #   Node2Vec embedding generator
+│   └── init_gat.py         #   PathGAT model initialization
+│
+├── graph/                  # Graph database layer
+│   ├── connection.py       #   Neo4j driver setup
+│   └── schema.py           #   Constraints & indexes
+│
+├── llm/                    # LLM reasoning layer
+│   ├── provider.py         #   Multi-provider LLM client
+│   ├── rag.py              #   Qdrant vector store & retrieval
+│   └── planner.py          #   Campaign plan orchestration
+│
+├── data/                   # Runtime data
+│   └── ingestion_log.json  #   Deduplication hash log
+│
+├── bootstrap.py            # One-command platform initializer
+├── start_api.py            # API server launcher
+├── rtap                    # CLI wrapper script
+├── pyproject.toml          # Package configuration & entry points
+├── docker-compose.yml      # Neo4j + Qdrant containers
+├── requirements.txt        # Python dependencies
+└── .env                    # Environment configuration
 ```
 
 ---
 
-## 🔌 API Documentation
+## `rtap` CLI Reference
 
-Run the API locally (or through Docker Compose):
+The `rtap` command is the primary interface for interacting with the platform. Use `rtap <command> --help` for detailed usage on any command.
+
+### Authentication
+
 ```bash
-python -m api.main
+# Log in (token cached at ~/.rtap/token.json with 0600 permissions)
+rtap auth login --username admin
+
+# Check current session
+rtap auth whoami
+
+# Log out (clears cached token)
+rtap auth logout
 ```
-Interactive OpenAPI documentation will be available at `http://localhost:8000/docs`.
 
-### Key REST Endpoints:
+### Graph Inspection
 
-#### 1. System Health Check
-* **Endpoint**: `GET /health`
-* **Description**: Verifies API operation and database connectivity.
-* **Response**:
-  ```json
-  {"status": "ok", "neo4j": true}
-  ```
+```bash
+# Display node and relationship counts
+rtap graph stats
+```
 
-#### 2. Graph Database Statistics
-* **Endpoint**: `GET /graph/stats`
-* **Description**: Outputs current node and edge counts grouped by label.
+### Threat Actors
 
-#### 3. Upload BloodHound Export
-* **Endpoint**: `POST /ingest/bloodhound`
-* **Payload**: Form-data file containing BloodHound JSON.
-* **Description**: Parses and inserts AD network data into the Neo4j schema.
-* **Response**:
-  ```json
-  {
-    "status": "success",
-    "nodes_ingested": 9,
-    "relationships_ingested": 10
-  }
-  ```
+```bash
+# List known threat actor profiles
+rtap actors list
 
-#### 4. Find Scored Attack Paths
-* **Endpoint**: `GET /paths`
-* **Query Parameters**: `source` (User name), `target` (Computer name)
-* **Description**: Returns all paths between source and target, ranked by their GNN-derived traversal risk.
-* **Example Request**: `/paths?source=hr_user01@ETHBANK.LOCAL&target=DC01.ETHBANK.LOCAL`
+# Show full technique names
+rtap actors list --verbose
+```
 
-#### 5. Generate Campaign Plan
-* **Endpoint**: `POST /plan/generate`
-* **Body**:
-  ```json
-  {
-    "source": "hr_user01@ETHBANK.LOCAL",
-    "target": "DC01.ETHBANK.LOCAL"
-  }
-  ```
-* **Description**: Extracts the top attack paths, fetches TI context from Qdrant, and builds a comprehensive emulation plan using the LLM.
+### Active Directory Ingestion
+
+```bash
+# Upload a SharpHound/BloodHound .zip export
+rtap ingest bloodhound <path/to/export.zip>
+```
+
+The ingest command:
+- Validates the file exists and is a `.zip`
+- Uploads via multipart POST to the API
+- Deduplicates previously ingested files by SHA-256 hash
+- Displays node/relationship count tables
+- Warns about skipped ACE types and incomplete collections
+
+### Attack Path Discovery
+
+```bash
+# Find and score attack paths between two AD nodes
+rtap paths "SOURCE_USER@DOMAIN.LOCAL" "TARGET_COMPUTER.DOMAIN.LOCAL"
+```
+
+Output includes:
+- **Rank** — Path priority (1 = highest risk)
+- **Risk** — Color-coded severity (HIGH 🔴 / MEDIUM 🟡 / LOW)
+- **GAT Score** — GNN-derived traversal risk score
+- **Hops** — Number of edges in the path
+- **Path** — Full traversal chain with relationship types
+
+### Campaign Plan Generation
+
+```bash
+# Generate an AI-powered red team campaign playbook
+rtap plan generate "SOURCE_USER@DOMAIN.LOCAL" "TARGET_COMPUTER.DOMAIN.LOCAL"
+```
+
+This command:
+1. Discovers the highest-risk attack path
+2. Correlates it with a matching threat actor profile
+3. Retrieves relevant threat intelligence from Qdrant
+4. Generates a comprehensive campaign plan via LLM
 
 ---
 
-## 🔍 Database Inspection & Cypher Cheat Sheet
+## API Endpoints
 
-Interact with the graph database directly via the Neo4j Browser at `http://localhost:7474`.
+The FastAPI backend runs on `http://localhost:8000`. Full interactive documentation available at `/docs`.
 
-### Count All Nodes by Label:
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| `GET` | `/health` | System health check (no auth required) |
+| `POST` | `/auth/login` | Obtain JWT token |
+| `GET` | `/graph/stats` | Node and relationship counts |
+| `GET` | `/actors` | List threat actor profiles |
+| `POST` | `/ingest/bloodhound` | Upload SharpHound ZIP |
+| `GET` | `/paths?source=...&target=...` | Discover scored attack paths |
+| `POST` | `/plan/generate` | Generate campaign playbook |
+
+All endpoints except `/health` and `/auth/login` require a valid JWT token via `Authorization: Bearer <token>` header.
+
+---
+
+## Database Access
+
+### Neo4j Browser
+
+Access the graph database directly at `http://localhost:7474` (credentials: `neo4j` / `changeme`).
+
+**Useful Cypher Queries:**
+
 ```cypher
-MATCH (n) 
-RETURN labels(n)[0] AS NodeLabel, count(n) AS TotalCount 
-ORDER BY TotalCount DESC
+-- Count nodes by label
+MATCH (n) RETURN labels(n)[0] AS Label, count(n) AS Count ORDER BY Count DESC
+
+-- View threat actors and their techniques
+MATCH (a:ThreatActor)-[:USES]->(t:Technique) RETURN a.name, t.name
+
+-- Find shortest paths from a user to a target
+MATCH p = shortestPath((u:User {name: $source})-[*1..5]->(t:Computer {name: $target}))
+RETURN p LIMIT 10
+
+-- List nodes with GNN embeddings
+MATCH (n) WHERE n.embedding IS NOT NULL
+RETURN labels(n)[0] AS Type, n.name AS Name, size(n.embedding) AS Dimensions LIMIT 10
 ```
 
-### Check Nodes Based on Ingestion Source:
-```cypher
-MATCH (n) 
-RETURN n.source AS SourceType, count(n) AS TotalCount
-```
+### Qdrant Dashboard
 
-### View Threat Actors and their USES/TARGETS Relationships:
-```cypher
-MATCH (a:ThreatActor)-[r]->(n) 
-RETURN a.name AS ThreatActor, type(r) AS Relationship, n.name AS Target
-```
+Access the vector database dashboard at `http://localhost:6333/dashboard`.
 
-### Find Shortest Paths from a User to Domain Admins Group:
-```cypher
-MATCH p = shortestPath((u:User)-[*1..5]->(g:Group {name: 'DOMAIN ADMINS@ETHBANK.LOCAL'}))
-RETURN p 
-LIMIT 10
-```
+---
 
-### List Nodes with GNN Embeddings:
-```cypher
-MATCH (n) 
-WHERE n.embedding IS NOT NULL 
-RETURN labels(n)[0] AS Type, n.name AS Name, size(n.embedding) AS VectorDimensions 
-LIMIT 10
+## Operational Workflow
+
+A typical red team assessment workflow:
+
+```
+1. Bootstrap        →  python bootstrap.py
+2. Start API        →  python start_api.py
+3. Authenticate     →  rtap auth login --username admin
+4. Ingest AD Data   →  rtap ingest bloodhound <sharphound.zip>
+5. Train GNN        →  python -m gnn.embeddings
+6. Discover Paths   →  rtap paths "user@domain" "target.domain"
+7. Generate Plan    →  rtap plan generate "user@domain" "target.domain"
 ```
 
 ---
 
-## 📝 License & Project Details
+## Security Notice
 
-* **Project Title**: Red Team Planning and Analysis Platform
-* **Affiliation**: INSA Ethio Cyber Talent Program — Red Team Track
-* **Security Notice**: This platform is designed exclusively for authorized cybersecurity research, red-teaming emulation exercises, and security planning. Make sure to obtain proper authorization before scanning or modeling production networks.
+This platform is designed exclusively for **authorized cybersecurity research**, red team emulation exercises, and security planning. Obtain proper authorization before scanning or modeling production networks.
+
+---
+
+## License & Credits
+
+- **Project**: Red Team Planning and Analysis Platform (ETHIO-RTAP)
+- **Affiliation**: INSA Ethio Cyber Talent Program — Red Team Track
