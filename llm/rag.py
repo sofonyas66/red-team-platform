@@ -8,12 +8,22 @@ from Neo4j into Qdrant vector store. Retrieves relevant chunks for queries.
 from typing import List, Dict, Any
 from qdrant_client import QdrantClient
 from qdrant_client.http import models
-from sentence_transformers import SentenceTransformer
-from graph.connection import driver
+from graph.connection import get_driver
 
-# Initialize Qdrant and SentenceTransformer
+# Initialize Qdrant eagerly (lightweight, no ML deps)
 qdrant = QdrantClient(host="localhost", port=6333, timeout=120.0)
-encoder = SentenceTransformer("all-MiniLM-L6-v2")  # 384-dim, fast, local
+
+# ── Lazy SentenceTransformer singleton ────────────────────────────────────
+# sentence-transformers pulls in torch at import time; defer until first use
+# so the API can boot on machines without the ML stack installed.
+_encoder = None
+
+def _get_encoder():
+    global _encoder
+    if _encoder is None:
+        from sentence_transformers import SentenceTransformer  # lazy — heavy ML dep
+        _encoder = SentenceTransformer("all-MiniLM-L6-v2")  # 384-dim, fast, local
+    return _encoder
 
 COLLECTION_NAME = "eti_core"
 VECTOR_SIZE = 384
@@ -35,11 +45,13 @@ def init_collection():
         print(f"Qdrant collection '{COLLECTION_NAME}' already exists")
 
 
-def embed_eti_core():
+async def embed_eti_core():
     """
     Pull every ThreatActor and Technique node from Neo4j with their descriptions.
     For each, create a text chunk combining name + description + tactic + sectors.
     Embed with sentence-transformers and store in Qdrant collection "eti_core".
+
+    ETI-Core data is NOT tenant-scoped — uses the async driver directly.
     """
     print("Initializing Qdrant collection...")
     init_collection()
@@ -47,9 +59,10 @@ def embed_eti_core():
     chunks = []
 
     print("Fetching ThreatActor and Technique nodes from Neo4j...")
-    with driver.session() as session:
+    driver = get_driver()
+    async with driver.session() as session:
         # 1. Fetch ThreatActors
-        actor_result = session.run("""
+        actor_result = await session.run("""
             MATCH (a:ThreatActor)
             OPTIONAL MATCH (a)-[:TARGETS]->(s:Sector)
             RETURN a.actor_id AS id,
@@ -60,7 +73,7 @@ def embed_eti_core():
                    a.resource_level AS resource_level,
                    collect(s.name) AS sectors
         """)
-        for record in actor_result:
+        async for record in actor_result:
             sectors = record["sectors"]
             sectors_str = ", ".join(sectors) if sectors else "None"
             text = (
@@ -88,14 +101,14 @@ def embed_eti_core():
             })
 
         # 2. Fetch Techniques
-        tech_result = session.run("""
+        tech_result = await session.run("""
             MATCH (t:Technique)
             RETURN t.technique_id AS id,
                    t.name AS name,
                    t.description AS description,
                    t.tactic AS tactic
         """)
-        for record in tech_result:
+        async for record in tech_result:
             text = (
                 f"Technique: {record['name']} (ID: {record['id']})\n"
                 f"Tactic: {record['tactic'] or 'Unknown'}\n"
@@ -120,7 +133,7 @@ def embed_eti_core():
 
     print(f"Embedding {len(chunks)} chunks using all-MiniLM-L6-v2...")
     texts = [c["text"] for c in chunks]
-    embeddings = encoder.encode(texts, show_progress_bar=True, batch_size=32)
+    embeddings = _get_encoder().encode(texts, show_progress_bar=True, batch_size=32)
 
     points = []
     for i, (chunk, emb) in enumerate(zip(chunks, embeddings)):
@@ -151,7 +164,7 @@ def retrieve_context(query: str, top_k: int = 3) -> List[Dict[str, Any]]:
     Embed the query text, search Qdrant collection "eti_core",
     return top_k most relevant chunks with their payloads.
     """
-    query_vector = encoder.encode([query])[0].tolist()
+    query_vector = _get_encoder().encode([query])[0].tolist()
     
     results = qdrant.query_points(
         collection_name=COLLECTION_NAME,
@@ -175,7 +188,8 @@ def retrieve_context(query: str, top_k: int = 3) -> List[Dict[str, Any]]:
 
 
 if __name__ == "__main__":
-    embed_eti_core()
+    import asyncio
+    asyncio.run(embed_eti_core())
     print("\nTesting retrieval with 'government sector spearphishing':")
     results = retrieve_context("government sector spearphishing")
     for r in results:

@@ -1,192 +1,377 @@
 #!/usr/bin/env python3
 """
-gnn/init_gat.py — Initialize and cache the PathGAT model with graph data.
+gnn/init_gat.py — Per-tenant GAT model initialization, caching, and background retraining.
 
-Run once at startup to:
-1. Load all node embeddings from Neo4j
-2. Build edge_index, edge_type tensors from all relationships
-3. Train PathGAT using domain-informed edge severity
-4. Cache model weights + tensors to disk for fast subsequent loads
+Cache layout on disk:
+    gnn/cache/{org_id}/{engagement_id}/path_gat.pt
+    gnn/cache/{org_id}/{engagement_id}/graph_tensors.pt
+    gnn/cache/{org_id}/{engagement_id}/metadata.json   # trained_at, node/edge counts, status
+
+In-memory: bounded LRU OrderedDict keyed by (org_id, engagement_id).
+    Evictions only remove the hot in-memory copy — disk cache persists.
+
+torch and torch_geometric are imported lazily (inside functions that need them)
+so this module can be imported without the ML stack.
 """
-import os
 import json
-import torch
-import numpy as np
+import threading
+from collections import OrderedDict
+from datetime import datetime
 from pathlib import Path
 
-from graph.connection import driver
 from gnn.model import (
-    PathGAT, EDGE_TYPES, EDGE_TYPE_TO_ID, EDGE_SEVERITY,
-    train_gat, score_path
+    EDGE_TYPES, EDGE_TYPE_TO_ID, EDGE_SEVERITY,
+    get_path_gat_class, train_gat, score_path,
 )
 
+# ── Disk cache root ────────────────────────────────────────────────────────
 CACHE_DIR = Path(__file__).parent / "cache"
 CACHE_DIR.mkdir(exist_ok=True)
 
-MODEL_PATH = CACHE_DIR / "path_gat.pt"
-TENSORS_PATH = CACHE_DIR / "graph_tensors.pt"
-MAPPING_PATH = CACHE_DIR / "node_mapping.json"
+# ── In-memory LRU cache (bounded) ─────────────────────────────────────────
+_MAX_CACHED_MODELS_IN_MEMORY = 5   # tune based on available RAM
+_gat_state_cache: "OrderedDict[tuple[str, str], dict]" = OrderedDict()
+_cache_lock = threading.Lock()
+
+# ── Background retraining status ──────────────────────────────────────────
+# Simple in-memory tracker.
+# LIMITATION: status is lost on process restart.  A future pass should
+# persist this in the `ingestion_records` Postgres table.
+_retrain_status: dict[tuple[str, str], dict] = {}
 
 
-def load_graph_data():
-    """Load node embeddings and all relationships from Neo4j."""
-    with driver.session() as session:
-        # Load embeddings
-        emb_result = session.run("""
-            MATCH (n) WHERE n.embedding IS NOT NULL
-            RETURN 
+# ═══════════════════════════════════════════════════════════════════════════
+# Helpers
+# ═══════════════════════════════════════════════════════════════════════════
+
+def _tenant_cache_dir(org_id: str, engagement_id: str) -> Path:
+    d = CACHE_DIR / org_id / engagement_id
+    d.mkdir(parents=True, exist_ok=True)
+    return d
+
+
+def _cache_key(org_id: str, engagement_id: str) -> tuple[str, str]:
+    return (org_id, engagement_id)
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# Graph data loading (async, tenant-scoped)
+# ═══════════════════════════════════════════════════════════════════════════
+
+async def load_graph_data(org_id: str, engagement_id: str):
+    """
+    Load node embeddings and relationships from Neo4j scoped to one tenant+engagement.
+    Uses TenantSession so every query carries $org_id / $engagement_id.
+    """
+    from graph.tenant_session import TenantSession
+
+    node_names: list[str] = []
+    node_embeddings: list = []
+    node_types: list[str] = []
+    edges: list[dict] = []
+
+    async with TenantSession(org_id=org_id, engagement_id=engagement_id) as ts:
+        emb_result = await ts.run("""
+            MATCH (n)
+            WHERE n.embedding IS NOT NULL AND n.org_id = $org_id
+            RETURN
                 coalesce(n.name, n.objectid, n.actor_id, n.technique_id) AS name,
                 n.embedding AS embedding,
                 labels(n)[0] AS node_type
         """)
-        
-        node_names = []
-        node_embeddings = []
-        node_types = []
-        
-        for record in emb_result:
+        async for record in emb_result:
             node_names.append(record["name"])
             node_embeddings.append(record["embedding"])
             node_types.append(record["node_type"])
-        
-        # Load ALL relationships for GAT training
-        rel_result = session.run("""
+
+        rel_result = await ts.run("""
             MATCH (a)-[r]->(b)
             WHERE a.embedding IS NOT NULL AND b.embedding IS NOT NULL
-            RETURN 
+              AND a.org_id = $org_id AND b.org_id = $org_id
+            RETURN
                 coalesce(a.name, a.objectid, a.actor_id, a.technique_id) AS src,
                 coalesce(b.name, b.objectid, b.actor_id, b.technique_id) AS dst,
                 type(r) AS rel_type
         """)
-        
-        edges = []
-        for record in rel_result:
+        async for record in rel_result:
             edges.append({
                 "src": record["src"],
                 "dst": record["dst"],
-                "type": record["rel_type"]
+                "type": record["rel_type"],
             })
-    
+
     return node_names, node_embeddings, node_types, edges
 
 
+# ═══════════════════════════════════════════════════════════════════════════
+# Tensor building
+# ═══════════════════════════════════════════════════════════════════════════
+
 def build_tensors(node_names, node_embeddings, edges):
-    """Build PyG-compatible tensors from graph data."""
+    """Build PyG-compatible tensors from raw graph data."""
+    import torch  # lazy
+
     name_to_idx = {name: i for i, name in enumerate(node_names)}
-    
-    edge_src = []
-    edge_dst = []
-    edge_type_ids = []
-    edge_type_names = []
-    
+
+    edge_src, edge_dst, edge_type_ids, edge_type_names = [], [], [], []
     for edge in edges:
-        src_name = edge["src"]
-        dst_name = edge["dst"]
-        rel_type = edge["type"]
-        
-        if src_name in name_to_idx and dst_name in name_to_idx:
-            edge_src.append(name_to_idx[src_name])
-            edge_dst.append(name_to_idx[dst_name])
-            edge_type_ids.append(EDGE_TYPE_TO_ID.get(rel_type, 0))
-            edge_type_names.append(rel_type)
-    
-    # Node features: 128-dim Node2Vec embeddings (zero-pad for nodes without)
+        s, d, rt = edge["src"], edge["dst"], edge["type"]
+        if s in name_to_idx and d in name_to_idx:
+            edge_src.append(name_to_idx[s])
+            edge_dst.append(name_to_idx[d])
+            edge_type_ids.append(EDGE_TYPE_TO_ID.get(rt, 0))
+            edge_type_names.append(rt)
+
     x = torch.tensor(node_embeddings, dtype=torch.float)
     if x.shape[1] < 128:
         pad = torch.zeros(x.shape[0], 128 - x.shape[1])
         x = torch.cat([x, pad], dim=1)
-    
+
     edge_index = torch.tensor([edge_src, edge_dst], dtype=torch.long)
     edge_type = torch.tensor(edge_type_ids, dtype=torch.long)
-    
+
     return x, edge_index, edge_type, edge_type_names, name_to_idx
 
 
-def initialize_gat():
-    """Initialize or load cached PathGAT model."""
-    # Check cache
-    if MODEL_PATH.exists() and TENSORS_PATH.exists() and MAPPING_PATH.exists():
-        print("[GAT] Loading cached model...")
-        x, edge_index, edge_type, edge_type_names = torch.load(TENSORS_PATH)
-        name_to_idx = json.loads(MAPPING_PATH.read_text())
-        
+# ═══════════════════════════════════════════════════════════════════════════
+# initialize_gat — load from disk cache or train fresh
+# ═══════════════════════════════════════════════════════════════════════════
+
+async def initialize_gat(
+    org_id: str,
+    engagement_id: str,
+    force_retrain: bool = False,
+) -> dict:
+    """
+    Return a state dict for the given tenant+engagement.
+
+    State dict keys:
+        model, x, edge_index, edge_type, edge_type_names, name_to_idx
+
+    If a disk cache exists and force_retrain is False, loads from disk.
+    Otherwise trains fresh against Neo4j data and writes to disk.
+    """
+    import torch  # lazy
+
+    PathGAT = get_path_gat_class()
+    cache_dir = _tenant_cache_dir(org_id, engagement_id)
+    model_path = cache_dir / "path_gat.pt"
+    tensors_path = cache_dir / "graph_tensors.pt"
+    mapping_path = cache_dir / "node_mapping.json"
+    meta_path = cache_dir / "metadata.json"
+
+    if not force_retrain and model_path.exists() and tensors_path.exists() and mapping_path.exists():
+        print(f"[GAT] Loading cached model for {org_id}/{engagement_id} ...")
+        x, edge_index, edge_type, edge_type_names = torch.load(
+            tensors_path, map_location="cpu", weights_only=False
+        )
+        name_to_idx = json.loads(mapping_path.read_text())
         model = PathGAT()
-        model.load_state_dict(torch.load(MODEL_PATH, map_location="cpu"))
+        model.load_state_dict(
+            torch.load(model_path, map_location="cpu", weights_only=True)
+        )
         model.eval()
-        
-        return model, x, edge_index, edge_type, edge_type_names, name_to_idx
-    
-    print("[GAT] Initializing fresh model from Neo4j...")
-    node_names, node_embeddings, node_types, edges = load_graph_data()
+        return dict(
+            model=model, x=x, edge_index=edge_index,
+            edge_type=edge_type, edge_type_names=edge_type_names,
+            name_to_idx=name_to_idx,
+        )
+
+    print(f"[GAT] Training fresh model for {org_id}/{engagement_id} ...")
+    node_names, node_embeddings, node_types, edges = await load_graph_data(
+        org_id, engagement_id
+    )
     print(f"  Nodes with embeddings: {len(node_names)}")
     print(f"  Relationships: {len(edges)}")
-    
+
+    if not node_names:
+        raise RuntimeError(
+            f"No embedded nodes found for org={org_id} engagement={engagement_id}. "
+            "Run gnn/embeddings.py first."
+        )
+
     x, edge_index, edge_type, edge_type_names, name_to_idx = build_tensors(
         node_names, node_embeddings, edges
     )
-    print(f"  Tensor shapes: x={x.shape}, edge_index={edge_index.shape}, edge_type={edge_type.shape}")
-    
+    print(f"  x={x.shape}, edge_index={edge_index.shape}, edge_type={edge_type.shape}")
+
     model = PathGAT()
     model = train_gat(model, x, edge_index, edge_type, edge_type_names)
-    
-    # Cache everything
-    torch.save(model.state_dict(), MODEL_PATH)
-    torch.save((x, edge_index, edge_type, edge_type_names), TENSORS_PATH)
-    MAPPING_PATH.write_text(json.dumps(name_to_idx))
-    print(f"  Cached to {CACHE_DIR}")
-    
-    return model, x, edge_index, edge_type, edge_type_names, name_to_idx
+
+    # Persist to disk
+    torch.save(model.state_dict(), model_path)
+    torch.save((x, edge_index, edge_type, edge_type_names), tensors_path)
+    mapping_path.write_text(json.dumps(name_to_idx))
+    meta_path.write_text(json.dumps({
+        "trained_at": datetime.utcnow().isoformat(),
+        "node_count": len(node_names),
+        "edge_count": len(edges),
+        "status": "ready",
+    }))
+    print(f"  Cached to {cache_dir}")
+
+    return dict(
+        model=model, x=x, edge_index=edge_index,
+        edge_type=edge_type, edge_type_names=edge_type_names,
+        name_to_idx=name_to_idx,
+    )
 
 
-# Global singleton
-_GAT_STATE = None
+# ═══════════════════════════════════════════════════════════════════════════
+# In-memory LRU cache API
+# ═══════════════════════════════════════════════════════════════════════════
 
-def get_gat_state():
-    """Get or initialize the global GAT state."""
-    global _GAT_STATE
-    if _GAT_STATE is None:
-        _GAT_STATE = initialize_gat()
-    return _GAT_STATE
+async def get_gat_state(org_id: str, engagement_id: str) -> dict:
+    """
+    Return the GAT state for this tenant+engagement, from in-memory LRU cache
+    or by loading/training on demand.
+    """
+    key = _cache_key(org_id, engagement_id)
+
+    with _cache_lock:
+        if key in _gat_state_cache:
+            _gat_state_cache.move_to_end(key)  # LRU touch
+            return _gat_state_cache[key]
+
+    # Load/train outside the lock (can be slow)
+    state = await initialize_gat(org_id, engagement_id)
+
+    with _cache_lock:
+        _gat_state_cache[key] = state
+        _gat_state_cache.move_to_end(key)
+        while len(_gat_state_cache) > _MAX_CACHED_MODELS_IN_MEMORY:
+            evicted_key, _ = _gat_state_cache.popitem(last=False)
+            print(f"[GAT] LRU eviction: {evicted_key} (disk cache untouched)")
+
+    return state
 
 
-def score_candidate_path(path_nodes, path_rels, name_to_idx):
-    """Score a single candidate path using the trained GAT."""
-    model, x, edge_index, edge_type, edge_type_names, _ = get_gat_state()
-    
-    # Map path edges to global edge indices
+def invalidate_gat_state(org_id: str, engagement_id: str):
+    """
+    Clear in-memory AND on-disk cache for one tenant+engagement.
+    Called after re-ingestion so the next call to get_gat_state() retrains.
+    Only invalidates the specified tenant — other tenants are not affected.
+    """
+    key = _cache_key(org_id, engagement_id)
+    with _cache_lock:
+        _gat_state_cache.pop(key, None)
+
+    cache_dir = CACHE_DIR / org_id / engagement_id
+    if cache_dir.exists():
+        import shutil
+        shutil.rmtree(cache_dir)
+        print(f"[GAT] Invalidated cache for {org_id}/{engagement_id}")
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# Background retraining
+# ═══════════════════════════════════════════════════════════════════════════
+
+async def retrain_gat_background(org_id: str, engagement_id: str):
+    """
+    Async background task called by FastAPI BackgroundTasks.
+
+    FastAPI (≥0.51, confirmed on 0.141.1 pinned here) natively awaits async
+    background callables on the *same* event loop as the request handler.
+    This means the AsyncGraphDatabase driver (bound to FastAPI's loop at import
+    time in graph/connection.py) is reachable without a loop mismatch.
+
+    The previous `def` + `asyncio.run()` implementation spun up a *new* event
+    loop, causing:
+        got Future <Future pending> attached to a different loop
+    because the driver's internal futures were owned by the main loop.
+
+    Status is tracked in _retrain_status (in-memory only — not crash-safe).
+    """
+    key = (org_id, engagement_id)
+    _retrain_status[key] = {
+        "status": "training",
+        "started_at": datetime.utcnow().isoformat(),
+    }
+    try:
+        state = await initialize_gat(org_id, engagement_id, force_retrain=True)
+        with _cache_lock:
+            _gat_state_cache[key] = state
+            _gat_state_cache.move_to_end(key)
+            while len(_gat_state_cache) > _MAX_CACHED_MODELS_IN_MEMORY:
+                _gat_state_cache.popitem(last=False)
+        _retrain_status[key] = {
+            "status": "ready",
+            "completed_at": datetime.utcnow().isoformat(),
+        }
+        print(f"[GAT] Background retraining complete for {org_id}/{engagement_id}")
+    except Exception as exc:
+        _retrain_status[key] = {
+            "status": "failed",
+            "error": str(exc),
+            "failed_at": datetime.utcnow().isoformat(),
+        }
+        print(f"[GAT] Background retraining FAILED for {org_id}/{engagement_id}: {exc}")
+
+
+def get_retrain_status(org_id: str, engagement_id: str) -> dict:
+    """Return the current retraining status for the given tenant+engagement."""
+    return _retrain_status.get((org_id, engagement_id), {"status": "not_started"})
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# Path scoring
+# ═══════════════════════════════════════════════════════════════════════════
+
+async def score_candidate_path(
+    path_nodes: list[str],
+    path_rels: list[str],
+    org_id: str,
+    engagement_id: str,
+) -> float:
+    """Score a single candidate attack path using the per-tenant trained GAT."""
+    state = await get_gat_state(org_id, engagement_id)
+    model = state["model"]
+    x = state["x"]
+    edge_index = state["edge_index"]
+    edge_type = state["edge_type"]
+    edge_type_names = state["edge_type_names"]
+    name_to_idx = state["name_to_idx"]
+
     path_edge_indices = []
     for i in range(len(path_nodes) - 1):
         src_name = path_nodes[i]
         dst_name = path_nodes[i + 1]
         rel_type = path_rels[i]
-        
+
         if src_name in name_to_idx and dst_name in name_to_idx:
             src_idx = name_to_idx[src_name]
             dst_idx = name_to_idx[dst_name]
-            
-            # Find matching edge in global edge_index
+
             matches = (edge_index[0] == src_idx) & (edge_index[1] == dst_idx)
             match_indices = matches.nonzero(as_tuple=True)[0]
-            
+
             if len(match_indices) > 0:
-                # Prefer edge with matching rel_type
                 for idx in match_indices:
                     if edge_type_names[idx] == rel_type:
                         path_edge_indices.append(idx.item())
                         break
                 else:
                     path_edge_indices.append(match_indices[0].item())
-    
+
     if not path_edge_indices:
         return 0.0
-    
+
     return score_path(model, x, edge_index, edge_type, path_edge_indices)
 
 
 if __name__ == "__main__":
-    # Test initialization
-    model, x, edge_index, edge_type, edge_type_names, name_to_idx = initialize_gat()
-    print(f"GAT initialized successfully!")
-    print(f"  Model params: {sum(p.numel() for p in model.parameters())}")
-    print(f"  Nodes: {len(name_to_idx)}")
-    print(f"  Edges: {edge_index.shape[1]}")
+    import asyncio
+
+    async def _main():
+        import os
+        org_id = os.getenv("TEST_ORG_ID", "test-org")
+        engagement_id = os.getenv("TEST_ENGAGEMENT_ID", "test-eng")
+        state = await initialize_gat(org_id, engagement_id)
+        model = state["model"]
+        print("GAT initialized successfully!")
+        print(f"  Model params: {sum(p.numel() for p in model.parameters())}")
+        print(f"  Nodes: {len(state['name_to_idx'])}")
+        print(f"  Edges: {state['edge_index'].shape[1]}")
+
+    asyncio.run(_main())

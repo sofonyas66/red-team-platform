@@ -14,7 +14,7 @@ import os
 import sys
 import logging
 from collections import defaultdict
-from graph.connection import driver
+from graph.tenant_session import TenantSession
 
 
 
@@ -85,7 +85,7 @@ NODE_CONFIG = {
 }
 
 
-def _ingest_nodes(session, meta_type: str, records: list) -> int:
+async def _ingest_nodes(session, meta_type: str, records: list, org_id: str, engagement_id: str) -> int:
     """MERGE nodes for one object type. Returns count ingested."""
     label, prop_keys = NODE_CONFIG[meta_type]
 
@@ -109,12 +109,14 @@ def _ingest_nodes(session, meta_type: str, records: list) -> int:
     if not batch:
         return 0
 
+    # org_id + engagement_id are part of the MERGE key to prevent cross-tenant
+    # node collisions when objectids/SIDs overlap across customer datasets.
     query = f"""
     UNWIND $batch AS row
-    MERGE (n:{label} {{objectid: row.objectid}})
+    MERGE (n:{label} {{objectid: row.objectid, org_id: $org_id, engagement_id: $engagement_id}})
     SET {set_clause}
     """
-    session.run(query, batch=batch)
+    await session.run(query, batch=batch, org_id=org_id, engagement_id=engagement_id)
     log.info("  %-10s  %4d nodes merged", label, len(batch))
     return len(batch)
 
@@ -133,7 +135,7 @@ def _ensure_stub(session, objectid: str):
     pass
 
 
-def _ingest_memberof(session, records: list) -> int:
+async def _ingest_memberof(session, records: list, org_id: str, engagement_id: str) -> int:
     """MemberOf from each Group's Members array."""
     batch = []
     for rec in records:
@@ -148,21 +150,20 @@ def _ingest_memberof(session, records: list) -> int:
     if not batch:
         return 0
 
-    # MERGE member as a stub node if it doesn't exist, then create relationship
     query = """
     UNWIND $batch AS row
-    MERGE (m {objectid: row.member})
+    MERGE (m {objectid: row.member, org_id: $org_id, engagement_id: $engagement_id})
     ON CREATE SET m.source = 'bloodhound'
     WITH m, row
-    MERGE (g {objectid: row.group})
+    MERGE (g {objectid: row.group, org_id: $org_id, engagement_id: $engagement_id})
     ON CREATE SET g.source = 'bloodhound'
     MERGE (m)-[:MemberOf]->(g)
     """
-    session.run(query, batch=batch)
+    await session.run(query, batch=batch, org_id=org_id, engagement_id=engagement_id)
     return len(batch)
 
 
-def _ingest_aces(session, all_records: dict) -> tuple:
+async def _ingest_aces(session, all_records: dict, org_id: str, engagement_id: str) -> tuple:
     """ACL relationships from every object type's Aces array.
 
     Returns: (dict of {RightName: count}, set of skipped RightName values)
@@ -193,24 +194,23 @@ def _ingest_aces(session, all_records: dict) -> tuple:
     for right_name, batch in ace_batches.items():
         if not batch:
             continue
-        # Since no APOC, use one query per relationship type
         query = f"""
         UNWIND $batch AS row
-        MERGE (p {{objectid: row.principal}})
+        MERGE (p {{objectid: row.principal, org_id: $org_id, engagement_id: $engagement_id}})
         ON CREATE SET p.source = 'bloodhound'
         WITH p, row
-        MERGE (t {{objectid: row.target}})
+        MERGE (t {{objectid: row.target, org_id: $org_id, engagement_id: $engagement_id}})
         ON CREATE SET t.source = 'bloodhound'
         MERGE (p)-[:{right_name}]->(t)
         """
-        session.run(query, batch=batch)
+        await session.run(query, batch=batch, org_id=org_id, engagement_id=engagement_id)
         counts[right_name] = len(batch)
         log.info("  %-22s  %4d ACL edges", right_name, len(batch))
 
     return counts, skipped_rights
 
 
-def _ingest_contains(session, all_records: dict) -> int:
+async def _ingest_contains(session, all_records: dict, org_id: str, engagement_id: str) -> int:
     """Contains relationships from every object's ContainedBy field."""
     batch = []
     for meta_type in OBJECT_TYPES_ORDER:
@@ -228,18 +228,18 @@ def _ingest_contains(session, all_records: dict) -> int:
 
     query = """
     UNWIND $batch AS row
-    MERGE (p {objectid: row.parent})
+    MERGE (p {objectid: row.parent, org_id: $org_id, engagement_id: $engagement_id})
     ON CREATE SET p.source = 'bloodhound'
     WITH p, row
-    MERGE (c {objectid: row.child})
+    MERGE (c {objectid: row.child, org_id: $org_id, engagement_id: $engagement_id})
     ON CREATE SET c.source = 'bloodhound'
     MERGE (p)-[:Contains]->(c)
     """
-    session.run(query, batch=batch)
+    await session.run(query, batch=batch, org_id=org_id, engagement_id=engagement_id)
     return len(batch)
 
 
-def _ingest_hassession(session, records: list) -> tuple:
+async def _ingest_hassession(session, records: list, org_id: str, engagement_id: str) -> tuple:
     """HasSession from Computer's Sessions field.
 
     Returns: (count of HasSession edges, count of computers with uncollected sessions)
@@ -265,18 +265,18 @@ def _ingest_hassession(session, records: list) -> tuple:
 
     query = """
     UNWIND $batch AS row
-    MERGE (c {objectid: row.computer})
+    MERGE (c {objectid: row.computer, org_id: $org_id, engagement_id: $engagement_id})
     ON CREATE SET c.source = 'bloodhound'
     WITH c, row
-    MERGE (u {objectid: row.user})
+    MERGE (u {objectid: row.user, org_id: $org_id, engagement_id: $engagement_id})
     ON CREATE SET u.source = 'bloodhound'
     MERGE (c)-[:HasSession]->(u)
     """
-    session.run(query, batch=batch)
+    await session.run(query, batch=batch, org_id=org_id, engagement_id=engagement_id)
     return len(batch), uncollected
 
 
-def _ingest_adminto(session, records: list) -> tuple:
+async def _ingest_adminto(session, records: list, org_id: str, engagement_id: str) -> tuple:
     """AdminTo from Computer's LocalGroups array.
 
     Finds the built-in Administrators group by SID suffix -544.
@@ -321,18 +321,18 @@ def _ingest_adminto(session, records: list) -> tuple:
 
     query = """
     UNWIND $batch AS row
-    MERGE (m {objectid: row.member})
+    MERGE (m {objectid: row.member, org_id: $org_id, engagement_id: $engagement_id})
     ON CREATE SET m.source = 'bloodhound'
     WITH m, row
-    MERGE (c {objectid: row.computer})
+    MERGE (c {objectid: row.computer, org_id: $org_id, engagement_id: $engagement_id})
     ON CREATE SET c.source = 'bloodhound'
     MERGE (m)-[:AdminTo]->(c)
     """
-    session.run(query, batch=batch)
+    await session.run(query, batch=batch, org_id=org_id, engagement_id=engagement_id)
     return len(batch), uncollected
 
 
-def _ingest_gplink(session, all_records: dict) -> int:
+async def _ingest_gplink(session, all_records: dict, org_id: str, engagement_id: str) -> int:
     """GpLink from OU/Domain Links arrays."""
     batch = []
     for meta_type in ("ous", "domains"):
@@ -350,14 +350,14 @@ def _ingest_gplink(session, all_records: dict) -> int:
 
     query = """
     UNWIND $batch AS row
-    MERGE (g {objectid: row.gpo})
+    MERGE (g {objectid: row.gpo, org_id: $org_id, engagement_id: $engagement_id})
     ON CREATE SET g.source = 'bloodhound'
     WITH g, row
-    MERGE (t {objectid: row.target})
+    MERGE (t {objectid: row.target, org_id: $org_id, engagement_id: $engagement_id})
     ON CREATE SET t.source = 'bloodhound'
     MERGE (g)-[:GpLink]->(t)
     """
-    session.run(query, batch=batch)
+    await session.run(query, batch=batch, org_id=org_id, engagement_id=engagement_id)
     return len(batch)
 
 
@@ -365,59 +365,61 @@ def _ingest_gplink(session, all_records: dict) -> int:
 #  Main entry point
 # ═══════════════════════════════════════════════════════════════════════════
 
-def ingest_bloodhound(folder_path: str) -> dict:
+async def ingest_bloodhound(folder_path: str, org_id: str, engagement_id: str) -> dict:
     """Ingest a SharpHound CE v6 export folder into Neo4j.
     Args:
-        folder_path: Path to directory containing per-type JSON files.
+        folder_path:   Path to directory containing per-type JSON files.
+        org_id:        Organization UUID — included in every MERGE key for tenant isolation.
+        engagement_id: Engagement UUID — included in every MERGE key for tenant isolation.
     Returns:
         Summary dict with counts of nodes, relationships, skipped ACE types, etc.
     """
-    log.info("Loading SharpHound export from: %s", folder_path)
+    log.info("Loading SharpHound export from: %s (org=%s engagement=%s)", folder_path, org_id, engagement_id)
     all_records = _load_folder(folder_path)
     node_counts = {}
     rel_counts = {}
-    with driver.session() as session:
+    async with TenantSession(org_id=org_id, engagement_id=engagement_id) as ts:
         # ── Pass 1: Create all nodes ──────────────────────────────────────
         log.info("── Pass 1: Merging nodes ──")
         for meta_type in OBJECT_TYPES_ORDER:
             records = all_records.get(meta_type, [])
             if records:
                 label = NODE_CONFIG[meta_type][0]
-                count = _ingest_nodes(session, meta_type, records)
+                count = await _ingest_nodes(ts, meta_type, records, org_id, engagement_id)
                 node_counts[label] = count
         # ── Pass 2: Create all relationships ──────────────────────────────
         log.info("── Pass 2: Merging relationships ──")
         # MemberOf (from groups)
         log.info("  Processing MemberOf...")
-        rel_counts["MemberOf"] = _ingest_memberof(session, all_records.get("groups", []))
+        rel_counts["MemberOf"] = await _ingest_memberof(ts, all_records.get("groups", []), org_id, engagement_id)
         log.info("  %-22s  %4d edges", "MemberOf", rel_counts["MemberOf"])
         # ACL relationships (from all types)
         log.info("  Processing ACLs...")
-        ace_counts, skipped_rights = _ingest_aces(session, all_records)
+        ace_counts, skipped_rights = await _ingest_aces(ts, all_records, org_id, engagement_id)
         rel_counts.update(ace_counts)
         # Contains (from all types via ContainedBy)
         log.info("  Processing Contains...")
-        rel_counts["Contains"] = _ingest_contains(session, all_records)
+        rel_counts["Contains"] = await _ingest_contains(ts, all_records, org_id, engagement_id)
         log.info("  %-22s  %4d edges", "Contains", rel_counts["Contains"])
         # HasSession (from computers)
         log.info("  Processing HasSession...")
-        has_session_count, uncollected_sessions = _ingest_hassession(
-            session, all_records.get("computers", [])
+        has_session_count, uncollected_sessions = await _ingest_hassession(
+            ts, all_records.get("computers", []), org_id, engagement_id
         )
         rel_counts["HasSession"] = has_session_count
         log.info("  %-22s  %4d edges  (%d computers uncollected)",
                  "HasSession", has_session_count, uncollected_sessions)
         # AdminTo (from computers)
         log.info("  Processing AdminTo...")
-        admin_to_count, uncollected_localgroups = _ingest_adminto(
-            session, all_records.get("computers", [])
+        admin_to_count, uncollected_localgroups = await _ingest_adminto(
+            ts, all_records.get("computers", []), org_id, engagement_id
         )
         rel_counts["AdminTo"] = admin_to_count
         log.info("  %-22s  %4d edges  (%d computers uncollected)",
                  "AdminTo", admin_to_count, uncollected_localgroups)
         # GpLink (from OUs and Domains)
         log.info("  Processing GpLink...")
-        rel_counts["GpLink"] = _ingest_gplink(session, all_records)
+        rel_counts["GpLink"] = await _ingest_gplink(ts, all_records, org_id, engagement_id)
         log.info("  %-22s  %4d edges", "GpLink", rel_counts["GpLink"])
     # Ensure all expected rel types appear in output even if 0
     for rt in ["MemberOf", "GenericAll", "GenericWrite", "WriteDacl",
@@ -447,8 +449,8 @@ def ingest_bloodhound(folder_path: str) -> dict:
 if __name__ == "__main__":
     import pprint
 
-    if len(sys.argv) < 2:
-        print("Usage: python -m etl.bloodhound <path-to-sharphound-folder>")
+    if len(sys.argv) < 4:
+        print("Usage: python -m etl.bloodhound <path-to-sharphound-folder> <org_id> <engagement_id>")
         sys.exit(1)
 
     folder = sys.argv[1]
@@ -456,7 +458,8 @@ if __name__ == "__main__":
         print(f"Error: {folder} is not a directory")
         sys.exit(1)
 
-    result = ingest_bloodhound(folder)
+    import asyncio
+    result = asyncio.run(ingest_bloodhound(folder, org_id=sys.argv[2], engagement_id=sys.argv[3]))
 
     print("\n═══ INGESTION SUMMARY ═══")
     pprint.pprint(result)

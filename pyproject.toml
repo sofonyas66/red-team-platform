@@ -12,31 +12,55 @@ classifiers = [
     "Programming Language :: Python :: 3",
     "Operating System :: OS Independent",
 ]
+
 dependencies = [
     "neo4j",
-    "stix2",
-    "torch",
-    "torch-geometric",
-    "node2vec",
     "fastapi",
     "uvicorn",
-    "qdrant-client",
-    "sentence-transformers",
-    "anthropic",
-    "openai",
+    "sqlalchemy>=2.0,<3.0",
+    "alembic>=1.13,<2.0",
+    "asyncpg>=0.29,<1.0",
+    "psycopg2-binary",
+    "passlib[bcrypt]>=1.7,<2.0",
+    "bcrypt>=3.2,<4.0",  # passlib 1.7.x incompatible with bcrypt 4.x's __about__ removal
+    "pyjwt",
+    "slowapi",
     "python-dotenv",
     "python-multipart",
     "httpx",
-    "numpy",
-    "networkx",
     "typer",
     "rich",
-    "pyjwt",
-    "slowapi"
+    "stix2",
+    "qdrant-client",
+    "anthropic",
+    "openai",
+    # numpy is required by neo4j (optional codec path) and qdrant-client (hard dep) —
+    # NOT ML-only. On pre-AVX2 CPUs (e.g. Core 2 Duo), the default PyPI wheel will
+    # crash on import. Install with:
+    #   pip install numpy --no-binary numpy --no-cache-dir --force-reinstall \
+    #     --config-settings=setup-args="-Dcpu-baseline=none" \
+    #     --config-settings=setup-args="-Dcpu-dispatch=none"
+    "numpy",
+]
+
+[project.optional-dependencies]
+# torch/torch-geometric/sentence-transformers/node2vec: heavy ML deps for GAT
+# training and RAG embeddings. Core API routes work without these installed
+# (lazy-imported — see llm/rag.py, gnn/init_gat.py, gnn/model.py) and degrade
+# to a 503 on ML-dependent routes. On old/low-power CPUs, install torch via
+# the CPU-only index to avoid pulling CUDA packages and to get an SIMD
+# baseline that doesn't require AVX2:
+#   pip install torch --index-url https://download.pytorch.org/whl/cpu
+ml = [
+    "torch",
+    "torch-geometric",
+    "node2vec",
+    "sentence-transformers",
+    "networkx",
 ]
 
 [project.scripts]
 rtap = "cli.main:app"
 
 [tool.setuptools]
-packages = ["cli", "api", "eti_core", "etl", "gnn", "graph", "llm"]
+packages = ["cli", "api", "db", "eti_core", "etl", "gnn", "graph", "llm"]

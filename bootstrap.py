@@ -118,24 +118,33 @@ def start_docker_services():
     return False
 
 
-def wait_for_neo4j_engine():
+async def _neo4j_ping() -> bool:
+    """Single async Neo4j ping. Returns True if reachable."""
+    from graph.connection import get_driver
+    try:
+        driver = get_driver()
+        async with driver.session() as s:
+            await s.run("RETURN 1")
+        return True
+    except Exception:
+        return False
+
+
+async def wait_for_neo4j_engine():
     """Wait for Neo4j internal engine to be responsive."""
     print("[*] Waiting for Neo4j internal engine to become responsive...")
-    from graph.connection import driver
 
     retries = 30
     for i in range(retries):
-        try:
-            with driver.session() as s:
-                s.run("RETURN 1")
+        ok = await _neo4j_ping()
+        if ok:
             print("[+] Neo4j engine is ready.")
             return True
-        except Exception as e:
-            if i == retries - 1:
-                print(f"[-] Could not establish Neo4j session: {e}")
-                print("    Verify credentials: NEO4J_USER / NEO4J_PASSWORD")
-                return False
-            time.sleep(2)
+        if i == retries - 1:
+            print("[-] Could not establish Neo4j session after retries.")
+            print("    Verify credentials: NEO4J_USER / NEO4J_PASSWORD")
+            return False
+        time.sleep(2)
     return False
 
 
@@ -153,36 +162,30 @@ def wait_for_qdrant():
     return False
 
 
-def main():
-    print("=" * 60)
-    print(" ETHIO-RTAP Platform Bootstrapper")
-    print("=" * 60)
-
-    # 1. Start databases
-    if not start_docker_services():
-        sys.exit(1)
-
-    # Wait for engine initialization
-    if not wait_for_neo4j_engine():
-        sys.exit(1)
+async def run_bootstrap():
+    """Run all bootstrap steps in a single event loop."""
+    # Wait for Neo4j engine
+    if not await wait_for_neo4j_engine():
+        return False
 
     if not wait_for_qdrant():
-        sys.exit(1)
+        return False
 
     # 2. Schema creation
     print("\n[*] Step 1: Initializing Neo4j Schema...")
+    from graph.connection import get_driver
     from graph.schema import create_schema
-    create_schema()
+    await create_schema()
 
     # 3. Load threat intel to Graph
     print("\n[*] Step 2: Loading ETI-Core Threat Intelligence...")
     from eti_core.loader import load_all
-    load_all()
+    await load_all()
 
     # 4. Populate Qdrant RAG context
     print("\n[*] Step 3: Generating RAG embeddings and loading Qdrant...")
     from llm.rag import embed_eti_core
-    embed_eti_core()
+    await embed_eti_core()
 
     print("\n" + "=" * 60)
     print(" Bootstrap Successful! Platform ready.")
@@ -199,6 +202,23 @@ def main():
     print("  4. Generate campaign playbooks:")
     print("     $ python -m cli.main plan generate <source_user> <target_computer>")
     print("=" * 60)
+    return True
+
+
+def main():
+    print("=" * 60)
+    print(" ETHIO-RTAP Platform Bootstrapper")
+    print("=" * 60)
+
+    # 1. Start databases (sync)
+    if not start_docker_services():
+        sys.exit(1)
+
+    # Run all async bootstrap steps in single event loop
+    import asyncio
+    success = asyncio.run(run_bootstrap())
+    if not success:
+        sys.exit(1)
 
 
 if __name__ == "__main__":

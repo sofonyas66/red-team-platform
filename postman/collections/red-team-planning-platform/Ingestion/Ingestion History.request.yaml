@@ -1,0 +1,12 @@
+$kind: http-request
+name: Ingestion History
+method: GET
+url: '{{baseUrl}}/ingestion/history'
+order: 2000
+description: |-
+  View the history of all ingested BloodHound files. Admin role required. Rate limited to 10/minute.
+auth:
+  type: bearer
+  credentials:
+    - key: token
+      value: '{{authToken}}'

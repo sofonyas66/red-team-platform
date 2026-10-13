@@ -16,15 +16,8 @@ outcomes, it's learning to combine structural attention with known
 security-relevant edge semantics.
 """
 
-import torch
-import torch.nn as nn
-import torch.nn.functional as F
-from torch_geometric.nn import RGATConv
-
-# --- Domain-informed edge severity priors -----------------------------
-# Encodes known AD privilege-escalation risk per BloodHound edge type.
-# Used as weak supervision (regression target) during training, and
-# remains inspectable/explainable at inference time.
+# ── Domain-informed edge severity priors (no torch needed) ────────────────
+# These are pure-Python constants — safe to define at module level.
 EDGE_TYPES = [
     "MemberOf", "Contains", "GpLink",               # low risk / structural
     "HasSession",                                    # medium
@@ -45,54 +38,72 @@ EDGE_SEVERITY = {
 }
 
 
-class PathGAT(nn.Module):
+# ── Lazy torch / torch_geometric imports ──────────────────────────────────
+# torch and torch_geometric are multi-GB ML deps.  Importing them at module
+# level prevents the API from booting on machines without the ML stack.
+# All torch-dependent code lives inside get_path_gat_class() and the
+# free functions below, which are only called when ML routes are hit.
+
+def get_path_gat_class():
     """
-    Two-layer Relational GAT.
+    Lazily import torch + torch_geometric and return the PathGAT class.
 
-    Input:  128-dim Node2Vec embeddings as initial node features.
-    Output: refined 32-dim node embeddings + per-edge attention weights,
-            used to score candidate attack paths.
+    Callers that previously did ``from gnn.model import PathGAT`` should
+    instead call ``PathGAT = get_path_gat_class()`` before instantiating.
     """
+    import torch                              # lazy — heavy ML dep
+    import torch.nn as nn
+    import torch.nn.functional as F
+    from torch_geometric.nn import RGATConv  # lazy — heavy ML dep
 
-    def __init__(self, in_channels=128, hidden_channels=64, out_channels=32,
-                 num_relations=len(EDGE_TYPES), heads=4, dropout=0.2):
-        super().__init__()
-        self.conv1 = RGATConv(
-            in_channels, hidden_channels // heads,
-            num_relations=num_relations, heads=heads, dropout=dropout,
-        )
-        self.conv2 = RGATConv(
-            hidden_channels, out_channels,
-            num_relations=num_relations, heads=1, dropout=dropout,
-        )
-        # Auxiliary head: predicts edge severity from the GAT's learned
-        # node representations. This is what gets trained against the
-        # domain-prior severity weights below.
-        self.severity_head = nn.Sequential(
-            nn.Linear(out_channels * 2, 32),
-            nn.ReLU(),
-            nn.Linear(32, 1),
-            nn.Sigmoid(),
-        )
+    class PathGAT(nn.Module):
+        """
+        Two-layer Relational GAT.
 
-    def forward(self, x, edge_index, edge_type, return_attention=False):
-        x1, _ = self.conv1(x, edge_index, edge_type, return_attention_weights=True)
-        x1 = F.elu(x1)
-        x2, (ei2, alpha2) = self.conv2(
-            x1, edge_index, edge_type, return_attention_weights=True
-        )
-        if return_attention:
-            return x2, (ei2, alpha2)
-        return x2
+        Input:  128-dim Node2Vec embeddings as initial node features.
+        Output: refined 32-dim node embeddings + per-edge attention weights,
+                used to score candidate attack paths.
+        """
 
-    def predict_edge_severity(self, node_emb, edge_index):
-        src, dst = edge_index
-        pair = torch.cat([node_emb[src], node_emb[dst]], dim=-1)
-        return self.severity_head(pair).squeeze(-1)
+        def __init__(self, in_channels=128, hidden_channels=64, out_channels=32,
+                     num_relations=len(EDGE_TYPES), heads=4, dropout=0.2):
+            super().__init__()
+            self.conv1 = RGATConv(
+                in_channels, hidden_channels // heads,
+                num_relations=num_relations, heads=heads, dropout=dropout,
+            )
+            self.conv2 = RGATConv(
+                hidden_channels, out_channels,
+                num_relations=num_relations, heads=1, dropout=dropout,
+            )
+            self.severity_head = nn.Sequential(
+                nn.Linear(out_channels * 2, 32),
+                nn.ReLU(),
+                nn.Linear(32, 1),
+                nn.Sigmoid(),
+            )
+
+        def forward(self, x, edge_index, edge_type, return_attention=False):
+            x1, _ = self.conv1(x, edge_index, edge_type, return_attention_weights=True)
+            x1 = F.elu(x1)
+            x2, (ei2, alpha2) = self.conv2(
+                x1, edge_index, edge_type, return_attention_weights=True
+            )
+            if return_attention:
+                return x2, (ei2, alpha2)
+            return x2
+
+        def predict_edge_severity(self, node_emb, edge_index):
+            src, dst = edge_index
+            pair = torch.cat([node_emb[src], node_emb[dst]], dim=-1)
+            return self.severity_head(pair).squeeze(-1)
+
+    return PathGAT
 
 
 def build_severity_targets(edge_type_names):
     """Map each edge's relationship-type name to its domain-prior severity."""
+    import torch  # lazy
     return torch.tensor(
         [EDGE_SEVERITY.get(t, 0.3) for t in edge_type_names],
         dtype=torch.float,
@@ -106,6 +117,9 @@ def train_gat(model, x, edge_index, edge_type, edge_type_names,
     supervision signal (regression), since no labeled ground-truth
     attack-path dataset exists for this environment.
     """
+    import torch                   # lazy
+    import torch.nn.functional as F  # lazy
+
     model.to(device)
     x = x.to(device)
     edge_index = edge_index.to(device)
@@ -130,7 +144,6 @@ def train_gat(model, x, edge_index, edge_type, edge_type_names,
     return model
 
 
-@torch.no_grad()
 def score_path(model, x, edge_index, edge_type, path_edge_indices, device="cpu"):
     """
     Scores a candidate attack path using the trained GAT.
@@ -144,8 +157,11 @@ def score_path(model, x, edge_index, edge_type, path_edge_indices, device="cpu")
     hop, with a mild length penalty so long low-value paths don't
     outrank short critical ones.
     """
+    import torch  # lazy
+
     model.eval()
-    node_emb, (ei, alpha) = model(x, edge_index, edge_type, return_attention=True)
+    with torch.no_grad():
+        node_emb, (ei, alpha) = model(x, edge_index, edge_type, return_attention=True)
 
     per_edge_attention = alpha.mean(dim=-1) if alpha.dim() > 1 else alpha
     pred_severity = model.predict_edge_severity(node_emb, edge_index)

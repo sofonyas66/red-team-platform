@@ -1,7 +1,12 @@
-from neo4j import GraphDatabase
+"""
+graph/schema.py — Neo4j schema bootstrap (constraints + indexes).
 
-URI = "bolt://localhost:7687"
-AUTH = ("neo4j", "changeme")
+This is NOT tenant-scoped: it runs once at startup against the whole
+database to ensure structural constraints exist.  Uses the shared async
+driver directly (not TenantSession).
+"""
+import asyncio
+from graph.connection import get_driver
 
 SCHEMA = [
     # ── Constraints (unique IDs per node type) ────────────────────────────
@@ -24,14 +29,16 @@ SCHEMA = [
     "CREATE INDEX technique_name IF NOT EXISTS FOR (t:Technique) ON (t.name)",
 ]
 
-def create_schema():
-    driver = GraphDatabase.driver(URI, auth=AUTH)
-    with driver.session() as session:
+
+async def create_schema():
+    """Create constraints and indexes.  Safe to call at every startup (IF NOT EXISTS)."""
+    driver = get_driver()
+    async with driver.session() as session:
         for stmt in SCHEMA:
-            session.run(stmt)
+            await session.run(stmt)
             print(f"OK: {stmt[:60]}...")
-    driver.close()
     print("\nSchema ready.")
 
+
 if __name__ == "__main__":
-    create_schema()
+    asyncio.run(create_schema())

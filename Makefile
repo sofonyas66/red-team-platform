@@ -38,7 +38,7 @@ BLUE := \033[0;34m
 RED := \033[0;31m
 NC := \033[0m
 
-.PHONY: help up down ps logs bootstrap api test clean install lint format check-env
+.PHONY: help up down ps logs bootstrap api test clean install lint format check-env check-isolation
 
 # Default target
 help:
@@ -169,6 +169,11 @@ check-env: .env
 		fi; \
 	done
 	@echo ""
+
+# Check Neo4j tenant isolation — fails if any .py outside approved files calls driver directly
+check-isolation:
+	@echo "$(BLUE)Checking Neo4j tenant isolation...$(NC)"
+	@bash scripts/check_tenant_isolation.sh
 
 # Quick development cycle
 dev: bootstrap

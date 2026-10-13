@@ -1,0 +1,12 @@
+$kind: http-request
+name: Graph Stats
+method: GET
+url: '{{baseUrl}}/graph/stats'
+order: 2000
+description: |-
+  Get node and relationship counts from the Neo4j graph database. Requires authentication. Rate limited to 30/minute.
+auth:
+  type: bearer
+  credentials:
+    - key: token
+      value: '{{authToken}}'

@@ -1,0 +1,19 @@
+$kind: http-request
+name: Login
+method: POST
+url: '{{baseUrl}}/auth/login'
+order: 1000
+description: |-
+  Obtain a JWT bearer token. Rate limited to 5 requests/minute. Known users: `admin` (roles: admin, analyst), `analyst` (roles: analyst).
+auth:
+  type: noauth
+headers:
+  - key: Content-Type
+    value: application/json
+body:
+  type: json
+  content: |-
+    {
+      "username": "admin",
+      "password": "your-password"
+    }

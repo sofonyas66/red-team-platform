@@ -1,0 +1,18 @@
+$kind: http-request
+name: Upload BloodHound Data
+method: POST
+url: '{{baseUrl}}/ingest/bloodhound'
+order: 1000
+description: |-
+  Upload a SharpHound .zip archive to ingest BloodHound data into the graph. Requires admin or analyst role. Rate limited to 10/hour. Duplicate uploads (same file hash) are skipped.
+auth:
+  type: bearer
+  credentials:
+    - key: token
+      value: '{{authToken}}'
+body:
+  type: formdata
+  content:
+    - key: file
+      type: file
+      src: ''

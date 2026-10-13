@@ -1,0 +1,17 @@
+$kind: http-request
+name: Get Paths
+method: GET
+url: '{{baseUrl}}/paths'
+order: 1000
+description: |-
+  Find and score attack paths between a source and target principal in the graph. Requires authentication. Rate limited to 30/minute.
+auth:
+  type: bearer
+  credentials:
+    - key: token
+      value: '{{authToken}}'
+queryParams:
+  - key: source
+    value: '{{sourcePrincipal}}'
+  - key: target
+    value: '{{targetPrincipal}}'

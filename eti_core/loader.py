@@ -1,24 +1,28 @@
+"""
+eti_core/loader.py — Load STIX2 threat-actor bundles into Neo4j.
+
+ETI-Core data (threat actors, techniques) is NOT tenant-scoped — it is
+shared reference data for all tenants.  Uses the async driver directly
+(not TenantSession).
+"""
+import asyncio
 import json
 import os
-from neo4j import GraphDatabase
-
-URI = "bolt://localhost:7687"
-AUTH = ("neo4j", "changeme")
+from graph.connection import get_driver
 
 ACTORS_DIR = os.path.join(os.path.dirname(__file__), "actors")
 
 
-def load_bundle(session, bundle: dict):
+async def load_bundle(session, bundle: dict):
+    """Load a single STIX2 bundle into Neo4j via the given async session."""
     objects = bundle.get("objects", [])
-
-    # Index by ID for relationship resolution
     by_id = {obj["id"]: obj for obj in objects}
 
     for obj in objects:
         t = obj["type"]
 
         if t == "threat-actor":
-            session.run("""
+            await session.run("""
                 MERGE (a:ThreatActor {actor_id: $id})
                 SET a.name = $name,
                     a.description = $description,
@@ -34,9 +38,8 @@ def load_bundle(session, bundle: dict):
                 "resource_level": obj.get("resource_level", "unknown"),
             })
 
-            # Link actor to targeted sectors
             for sector in obj.get("sectors", []):
-                session.run("""
+                await session.run("""
                     MERGE (s:Sector {name: $sector})
                     WITH s
                     MATCH (a:ThreatActor {actor_id: $actor_id})
@@ -44,7 +47,7 @@ def load_bundle(session, bundle: dict):
                 """, {"sector": sector, "actor_id": obj["id"]})
 
         elif t == "attack-pattern":
-            session.run("""
+            await session.run("""
                 MERGE (t:Technique {technique_id: $tid})
                 SET t.name = $name,
                     t.tactic = $tactic,
@@ -60,7 +63,7 @@ def load_bundle(session, bundle: dict):
             src = by_id.get(obj["source_ref"], {})
             tgt = by_id.get(obj["target_ref"], {})
             if src.get("type") == "threat-actor" and tgt.get("type") == "attack-pattern":
-                session.run("""
+                await session.run("""
                     MATCH (a:ThreatActor {actor_id: $actor_id})
                     MATCH (t:Technique {technique_id: $tid})
                     MERGE (a)-[:USES]->(t)
@@ -70,9 +73,10 @@ def load_bundle(session, bundle: dict):
                 })
 
 
-def load_all():
-    driver = GraphDatabase.driver(URI, auth=AUTH)
-    with driver.session() as session:
+async def load_all():
+    """Load all STIX2 bundles from the actors directory into Neo4j."""
+    driver = get_driver()
+    async with driver.session() as session:
         for fname in os.listdir(ACTORS_DIR):
             if not fname.endswith(".json"):
                 continue
@@ -80,11 +84,10 @@ def load_all():
             with open(fpath) as f:
                 bundle = json.load(f)
             print(f"Loading {fname}...")
-            load_bundle(session, bundle)
-            print(f"  Done.")
-    driver.close()
+            await load_bundle(session, bundle)
+            print("  Done.")
     print("\nETI-Core loaded.")
 
 
 if __name__ == "__main__":
-    load_all()
+    asyncio.run(load_all())

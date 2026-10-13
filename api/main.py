@@ -2,14 +2,13 @@
 api/main.py — FastAPI application for Red Team Planning Platform (Production-ready)
 """
 import os
-import json
 import hashlib
 import tempfile
 import zipfile
 import shutil
 from typing import List, Dict, Any, Optional
 from datetime import datetime
-from fastapi import FastAPI, HTTPException, UploadFile, File, Depends, Request, status
+from fastapi import FastAPI, HTTPException, UploadFile, File, Depends, Request, status, BackgroundTasks
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
@@ -21,49 +20,26 @@ from contextlib import asynccontextmanager
 from graph.connection import driver
 from etl.bloodhound import ingest_bloodhound as ingest_data
 from llm.planner import find_and_score_paths, generate_campaign_plan
+from config import ALLOWED_ORIGINS
 from api.auth import (
     get_current_user, require_roles, optional_auth, create_access_token,
-    User, TokenData, PUBLIC_PATHS
+    authenticate_user, AuthenticatedUser, TokenData, PUBLIC_PATHS
+)
+from db.ingestion_ops import (
+    is_already_ingested as pg_is_already_ingested,
+    record_ingestion as pg_record_ingestion,
+    get_ingestion_record_by_hash,
 )
 
 # Rate limiter
 limiter = Limiter(key_func=get_remote_address)
 
-# Ingestion tracking (in production: Redis/DB)
-DATA_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "data")
-INGESTION_TRACKER_FILE = os.path.join(DATA_DIR, "ingestion_log.json")
-
-def load_ingestion_log() -> Dict[str, Dict]:
-    if os.path.exists(INGESTION_TRACKER_FILE):
-        with open(INGESTION_TRACKER_FILE) as f:
-            return json.load(f)
-    return {}
-
-def save_ingestion_log(log: Dict[str, Dict]):
-    os.makedirs(os.path.dirname(INGESTION_TRACKER_FILE), exist_ok=True)
-    with open(INGESTION_TRACKER_FILE, "w") as f:
-        json.dump(log, f, indent=2)
-
 def file_hash(content: bytes) -> str:
     return hashlib.sha256(content).hexdigest()
-
-def is_already_ingested(content_hash: str) -> bool:
-    log = load_ingestion_log()
-    return content_hash in log
-
-def record_ingestion(content_hash: str, filename: str, result: Dict):
-    log = load_ingestion_log()
-    log[content_hash] = {
-        "filename": filename,
-        "ingested_at": datetime.utcnow().isoformat(),
-        "result": result
-    }
-    save_ingestion_log(log)
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     # Startup
-    os.makedirs(DATA_DIR, exist_ok=True)
     yield
     # Shutdown cleanup
 
@@ -74,10 +50,10 @@ app = FastAPI(
     lifespan=lifespan
 )
 
-# CORS
+# CORS — origins driven by ALLOWED_ORIGINS env var (never wildcard in production)
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # Restrict in production
+    allow_origins=ALLOWED_ORIGINS,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -133,20 +109,27 @@ async def auth_middleware(request: Request, call_next):
 @app.post("/auth/login", response_model=TokenResponse)
 @limiter.limit("5/minute")
 async def login(request: Request, credentials: TokenRequest):
-    """Obtain JWT token. In production, verify password hash."""
-    # Demo: accept any password for known users
-    from api.auth import USERS_DB
-    if credentials.username not in USERS_DB:
-        raise HTTPException(status_code=401, detail="Invalid credentials")
-    
-    user = USERS_DB[credentials.username]
-    access_token = create_access_token(
-        data={"sub": credentials.username, "roles": user["roles"]}
-    )
+    """Obtain JWT token. Verifies bcrypt password against Postgres."""
+    user = authenticate_user(credentials.username, credentials.password)
+    access_token = create_access_token(data={
+        "sub": str(user.id),
+        "org_id": str(user.org_id),
+        "role": user.role.value,
+    })
     return TokenResponse(
         access_token=access_token,
-        expires_in=60 * 24 * 60  # 24 hours in seconds
+        expires_in=60 * 24 * 60,  # 24 hours in seconds
     )
+
+
+@app.post("/auth/logout")
+@limiter.limit("30/minute")
+async def logout(request: Request, user: AuthenticatedUser = Depends(get_current_user)):
+    """Invalidate the current token.
+    TODO: add token to Redis-backed blocklist (Track 1.5).
+    For now this is a stub — the client should discard the token locally.
+    """
+    return {"detail": "Logged out. Token blocklist not yet implemented (Track 1.5 stub)."}
 
 # =============================================================================
 # Core Endpoints
@@ -156,8 +139,8 @@ async def login(request: Request, credentials: TokenRequest):
 @limiter.limit("60/minute")
 async def health(request: Request):
     try:
-        with driver.session() as session:
-            session.run("RETURN 1")
+        async with driver.session() as session:
+            await session.run("RETURN 1")
         return {"status": "ok", "neo4j": True, "timestamp": datetime.utcnow().isoformat()}
     except Exception as e:
         return JSONResponse(
@@ -167,23 +150,23 @@ async def health(request: Request):
 
 @app.get("/graph/stats")
 @limiter.limit("30/minute")
-async def graph_stats(request: Request, user: User = Depends(get_current_user)):
+async def graph_stats(request: Request, user: AuthenticatedUser = Depends(get_current_user)):
     try:
-        with driver.session() as session:
-            node_result = session.run("""
+        async with driver.session() as session:
+            node_result = await session.run("""
                 MATCH (n)
                 RETURN labels(n)[0] AS type, count(n) AS count
                 ORDER BY count DESC
             """)
-            nodes = {r["type"]: r["count"] for r in node_result}
-            
-            rel_result = session.run("""
+            nodes = {r["type"]: r["count"] async for r in node_result}
+
+            rel_result = await session.run("""
                 MATCH ()-[r]->()
                 RETURN type(r) AS type, count(r) AS count
                 ORDER BY count DESC
             """)
-            relationships = {r["type"]: r["count"] for r in rel_result}
-            
+            relationships = {r["type"]: r["count"] async for r in rel_result}
+
             return {"nodes": nodes, "relationships": relationships}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
@@ -204,8 +187,10 @@ def _safe_extract_zip(zip_path: str, extract_to: str):
 @limiter.limit("10/hour")
 async def upload_bloodhound(
     request: Request,
+    background_tasks: BackgroundTasks,
     file: UploadFile = File(...),
-    user: User = Depends(require_roles("admin", "analyst"))
+    engagement_id: str = "",
+    user: AuthenticatedUser = Depends(require_roles("org_admin", "operator"))
 ):
     if not file.filename.endswith('.zip'):
         raise HTTPException(
@@ -216,7 +201,7 @@ async def upload_bloodhound(
     content = await file.read()
     content_hash = file_hash(content)
 
-    if is_already_ingested(content_hash):
+    if pg_is_already_ingested(str(user.org_id), content_hash):
         return IngestResponse(
             status="skipped",
             skipped=True,
@@ -240,8 +225,22 @@ async def upload_bloodhound(
                 detail="No .json files found in the uploaded zip"
             )
 
-        result = ingest_data(extract_dir)
-        record_ingestion(content_hash, file.filename, result)
+        result = await ingest_data(extract_dir, org_id=str(user.org_id), engagement_id=engagement_id)
+        total_nodes = sum(result["nodes_ingested"].values())
+        total_edges = sum(result["relationships_ingested"].values())
+        pg_record_ingestion(
+            org_id=str(user.org_id),
+            engagement_id=engagement_id,
+            file_hash=content_hash,
+            filename=file.filename,
+            node_count=total_nodes,
+            edge_count=total_edges,
+            ingested_by=str(user.id),
+        )
+
+        from gnn.init_gat import invalidate_gat_state, retrain_gat_background
+        invalidate_gat_state(org_id=str(user.org_id), engagement_id=engagement_id)
+        background_tasks.add_task(retrain_gat_background, str(user.org_id), engagement_id)
 
         return IngestResponse(
             status="success",
@@ -265,11 +264,18 @@ async def get_paths(
     request: Request,
     source: str,
     target: str,
-    user: User = Depends(get_current_user)
+    engagement_id: str = "",
+    user: AuthenticatedUser = Depends(get_current_user)
 ):
     try:
-        paths = find_and_score_paths(source, target)
+        paths = await find_and_score_paths(source, target, org_id=str(user.org_id), engagement_id=engagement_id)
         return paths
+    except ImportError as e:
+        raise HTTPException(
+            status_code=503,
+            detail=f"ML stack not available on this instance: {e}. "
+                   "Install torch and torch_geometric to enable path scoring.",
+        )
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -278,20 +284,38 @@ async def get_paths(
 async def plan_generate(
     request: Request,
     plan_request: PlanRequest,
-    user: User = Depends(require_roles("admin", "analyst"))
+    engagement_id: str = "",
+    user: AuthenticatedUser = Depends(require_roles("org_admin", "operator"))
 ):
     try:
-        plan_text = generate_campaign_plan(plan_request.source, plan_request.target)
-        return {"plan": plan_text, "generated_by": user.username, "timestamp": datetime.utcnow().isoformat()}
+        plan_text = await generate_campaign_plan(plan_request.source, plan_request.target, org_id=str(user.org_id), engagement_id=engagement_id)
+        return {"plan": plan_text, "generated_by": user.id, "timestamp": datetime.utcnow().isoformat()}
+    except ImportError as e:
+        raise HTTPException(
+            status_code=503,
+            detail=f"ML stack not available on this instance: {e}. "
+                   "Install torch, torch_geometric, and sentence-transformers to enable plan generation.",
+        )
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
+@app.get("/gnn/status")
+@limiter.limit("60/minute")
+async def gnn_status(
+    request: Request,
+    engagement_id: str,
+    user: AuthenticatedUser = Depends(get_current_user),
+):
+    from gnn.init_gat import get_retrain_status
+    status = get_retrain_status(str(user.org_id), engagement_id)
+    return {"org_id": str(user.org_id), "engagement_id": engagement_id, **status}
+
 @app.get("/actors")
 @limiter.limit("30/minute")
-async def get_actors(request: Request, user: User = Depends(get_current_user)):
+async def get_actors(request: Request, user: AuthenticatedUser = Depends(get_current_user)):
     try:
-        with driver.session() as session:
-            result = session.run("""
+        async with driver.session() as session:
+            result = await session.run("""
                 MATCH (a:ThreatActor)
                 OPTIONAL MATCH (a)-[:USES]->(t:Technique)
                 RETURN a.name AS actor_name,
@@ -299,25 +323,73 @@ async def get_actors(request: Request, user: User = Depends(get_current_user)):
                        a.sophistication AS sophistication,
                        collect(DISTINCT t.name) AS techniques
             """)
-            
-            actors = []
-            for record in result:
-                actors.append({
+            actors = [
+                {
                     "actor_name": record["actor_name"],
                     "motivation": record["motivation"],
                     "sophistication": record["sophistication"],
-                    "techniques": record["techniques"]
-                })
+                    "techniques": record["techniques"],
+                }
+                async for record in result
+            ]
             return actors
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.get("/ingestion/history")
 @limiter.limit("10/minute")
-async def ingestion_history(request: Request, user: User = Depends(require_roles("admin"))):
-    """View ingestion history (admin only)."""
-    log = load_ingestion_log()
-    return {"history": log}
+async def ingestion_history(
+    request: Request,
+    user: AuthenticatedUser = Depends(require_roles("org_admin")),
+):
+    """View recent ingestion history for this org (admin only)."""
+    from sqlalchemy import select
+    from sqlalchemy.orm import Session as DBSession
+    from db.models import IngestionRecord
+    from db.ingestion_ops import _engine
+    import uuid as _uuid
+    with DBSession(_engine) as session:
+        stmt = select(IngestionRecord).where(
+            IngestionRecord.org_id == _uuid.UUID(str(user.org_id))
+        ).order_by(IngestionRecord.ingested_at.desc()).limit(50)
+        records = session.scalars(stmt).all()
+    return {"history": [
+        {
+            "id": str(r.id),
+            "file_hash": r.file_hash,
+            "filename": r.filename,
+            "status": r.status.value,
+            "node_count": r.node_count,
+            "edge_count": r.edge_count,
+            "ingested_at": r.ingested_at.isoformat(),
+        }
+        for r in records
+    ]}
+
+
+@app.get("/ingestion/history/{file_hash}")
+@limiter.limit("30/minute")
+async def ingestion_record_by_hash(
+    request: Request,
+    file_hash: str,
+    user: AuthenticatedUser = Depends(get_current_user),
+):
+    """Return the ingestion record for a specific file hash, scoped to this org."""
+    record = get_ingestion_record_by_hash(str(user.org_id), file_hash)
+    if not record:
+        raise HTTPException(status_code=404, detail=f"No ingestion record found for hash {file_hash[:16]}... in your org")
+    return {
+        "id": str(record.id),
+        "org_id": str(record.org_id),
+        "engagement_id": str(record.engagement_id),
+        "file_hash": record.file_hash,
+        "filename": record.filename,
+        "status": record.status.value,
+        "node_count": record.node_count,
+        "edge_count": record.edge_count,
+        "ingested_at": record.ingested_at.isoformat(),
+        "ingested_by": str(record.ingested_by),
+    }
 
 if __name__ == "__main__":
     import uvicorn

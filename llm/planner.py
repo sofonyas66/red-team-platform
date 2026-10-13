@@ -6,10 +6,11 @@ Combines GNN path scoring (Neo4j embeddings) + RAG context (Qdrant)
 """
 
 from typing import List, Dict, Any, Optional
-from graph.connection import driver
 from llm.provider import get_provider
-from llm.rag import retrieve_context
-from gnn.init_gat import score_candidate_path, get_gat_state
+
+# llm.rag and gnn.init_gat pull in sentence-transformers / torch at import
+# time — keep them lazy so the API boots without the ML stack installed.
+# Each function that needs them does a local import on first call.
 
 PROMPT_TEMPLATE = """You are a red team planning assistant for INSA, Ethiopia's national cybersecurity agency. Generate a structured campaign plan.
 
@@ -29,40 +30,44 @@ Write a campaign plan with these sections:
 
 For each phase specify: technique used, objective, rationale tied to the threat actor profile above. Keep total response under 400 words. Be specific and technical, not generic."""
 
-def identify_threat_actor(techniques: List[str]) -> Optional[str]:
+async def identify_threat_actor(techniques: list[str], org_id: str) -> str | None:
     """
     Find the threat actor in Neo4j that has the highest overlap
     with the techniques in the path.
     """
+    from graph.tenant_session import TenantSession
     if not techniques:
         return None
-    with driver.session() as session:
-        result = session.run("""
+    async with TenantSession(org_id=org_id) as ts:
+        result = await ts.run("""
             MATCH (a:ThreatActor)-[:USES]->(t:Technique)
             WHERE t.technique_id IN $techniques
             RETURN a.name AS actor_name, count(t) AS match_count
             ORDER BY match_count DESC
             LIMIT 1
         """, techniques=techniques)
-        record = result.single()
+        record = await result.single()
         if record:
             return record["actor_name"]
     return None
 
 
-def find_and_score_paths(source: str, target: str, max_hops: int = 5) -> List[Dict[str, Any]]:
+async def find_and_score_paths(source: str, target: str, org_id: str, engagement_id: str, max_hops: int = 5) -> List[Dict[str, Any]]:
     """
     Find paths from source (User) to target (Computer) and score them using PathGAT.
     """
-    # Get GAT state (initializes/trains on first call)
-    _, _, _, _, _, name_to_idx = get_gat_state()
-    
-    with driver.session() as session:
-        # Find paths matching source and target
-        # If target is specified, match by name, otherwise match any Computer
+    from gnn.init_gat import score_candidate_path, get_gat_state  # lazy ML import
+    from graph.tenant_session import TenantSession
+
+    # Get GAT state for this tenant
+    state = await get_gat_state(org_id, engagement_id)
+    name_to_idx = state["name_to_idx"]
+
+    async with TenantSession(org_id=org_id, engagement_id=engagement_id) as ts:
         query = """
-            MATCH p = (src:User {name: $source})-[*1..5]->(dst:Computer)
-            WHERE dst.name = $target OR $target IS NULL OR dst.objectid = $target
+            MATCH p = (src:User {name: $source, org_id: $org_id})-[*1..5]->(dst:Computer)
+            WHERE (dst.name = $target OR $target IS NULL OR dst.objectid = $target)
+              AND dst.org_id = $org_id
             RETURN 
                 [n in nodes(p) | coalesce(n.name, n.objectid, n.actor_id, n.technique_id)] AS path_nodes,
                 [r in relationships(p) | type(r)] AS rel_types,
@@ -70,33 +75,29 @@ def find_and_score_paths(source: str, target: str, max_hops: int = 5) -> List[Di
             ORDER BY hops
             LIMIT 10
         """
-        result = session.run(query, source=source, target=target)
-        paths = list(result)
+        result = await ts.run(query, source=source, target=target)
+        paths = [record async for record in result]
 
-        if not paths:
-            return []
+    if not paths:
+        return []
 
-        scored_paths = []
-        for path in paths:
-            nodes_list = path["path_nodes"]
-            rels_list = path["rel_types"]
-            
-            # Score using trained GAT
-            gat_score = score_candidate_path(nodes_list, rels_list, name_to_idx)
-            
-            scored_paths.append({
-                "score": gat_score,
-                "nodes": nodes_list,
-                "rels": rels_list,
-                "hops": path["hops"]
-            })
-        
-        # Sort by score descending
-        scored_paths.sort(key=lambda x: x["score"], reverse=True)
-        return scored_paths
+    scored_paths = []
+    for path in paths:
+        nodes_list = path["path_nodes"]
+        rels_list = path["rel_types"]
+        gat_score = await score_candidate_path(nodes_list, rels_list, org_id, engagement_id)
+        scored_paths.append({
+            "score": gat_score,
+            "nodes": nodes_list,
+            "rels": rels_list,
+            "hops": path["hops"]
+        })
+
+    scored_paths.sort(key=lambda x: x["score"], reverse=True)
+    return scored_paths
 
 
-def generate_campaign_plan(source: str, target: str) -> str:
+async def generate_campaign_plan(source: str, target: str, org_id: str, engagement_id: str) -> str:
     """
     Generate a complete campaign plan from source to target.
     
@@ -108,7 +109,7 @@ def generate_campaign_plan(source: str, target: str) -> str:
     6. Calls LLM via LLMProvider.
     """
     print(f"Finding and scoring paths from '{source}' to '{target}'...")
-    scored_paths = find_and_score_paths(source, target)
+    scored_paths = await find_and_score_paths(source, target, org_id, engagement_id)
     
     if not scored_paths:
         raise ValueError(f"No attack path found from {source} to {target}")
@@ -140,13 +141,14 @@ def generate_campaign_plan(source: str, target: str) -> str:
     techniques = [rel_to_technique[r] for r in path_rels if r in rel_to_technique]
     
     # Identify threat actor
-    actor_name = identify_threat_actor(techniques) or "a relevant threat actor"
+    actor_name = await identify_threat_actor(techniques, org_id) or "a relevant threat actor"
     print(f"Correlated Threat Actor: {actor_name}")
     
     # Build query for RAG scoped specifically to the identified threat actor
     rag_query = f"Threat Actor: {actor_name} " + " ".join(techniques)
 
     print(f"Retrieving threat intelligence context from Qdrant for query: '{rag_query}'...")
+    from llm.rag import retrieve_context  # lazy ML import (sentence-transformers)
     rag_results = retrieve_context(rag_query, top_k=3)
     
     # Format retrieved context
@@ -206,7 +208,7 @@ Method: Templated Fallback
 
 
 # Backward compatibility wrapper for existing code
-def generate_plan(paths: List[Dict], sector: str = "government", use_llm: bool = True) -> str:
+async def generate_plan(paths: List[Dict], sector: str = "government", use_llm: bool = True, org_id: str = "", engagement_id: str = "") -> str:
     """Backward compatible wrapper for old planner interface."""
     if not paths:
         return "No paths provided."
@@ -218,7 +220,7 @@ def generate_plan(paths: List[Dict], sector: str = "government", use_llm: bool =
         top_path = paths[0]
         source = top_path["nodes"][0]
         target = top_path["nodes"][-1]
-        return generate_campaign_plan(source, target)
+        return await generate_campaign_plan(source, target, org_id=org_id, engagement_id=engagement_id)
     except Exception as e:
         print(f"Error in generate_plan wrapper: {e}")
         return _templated_plan(paths)
