@@ -47,7 +47,7 @@ console = Console()
 app = typer.Typer(
     name="rtap",
     help="ETHIO-RTAP — Red Team Planning Platform CLI",
-    no_args_is_help=True,
+    no_args_is_help=False,
 )
 
 auth_app = typer.Typer(help="Authentication commands", no_args_is_help=True)
@@ -608,6 +608,93 @@ def ingest_bloodhound(
                 border_style="yellow",
             )
         )
+
+
+# =============================================================================
+# TUI Menu & Install Prompts
+# =============================================================================
+
+
+def run_tui() -> None:
+    """Interactive arrow-key menu launching subcommands directly."""
+    try:
+        import questionary
+    except ImportError:
+        console.print(
+            "[bold red]✗[/] 'questionary' is required for the interactive menu. "
+            "Install it via: [bold]pip install questionary[/]"
+        )
+        raise typer.Exit(code=1)
+
+    # Install-time check (same detection logic as /tmp/rtap_tui.py prototype)
+    config_path = Path.home() / ".rtap" / "config.toml"
+    config_exists = config_path.exists() or (os.path.exists(".env") and os.getenv("LLM_PROVIDER"))
+    if not config_exists:
+        provider = questionary.select(
+            "LLM Provider:",
+            choices=["Gemini (via OpenRouter)", "Ollama (offline)"],
+            default="Gemini (via OpenRouter)",
+        ).ask()
+        if provider and "Gemini" in provider:
+            key = questionary.password("OpenRouter API Key:").ask()
+            with open(".env", "a") as f:
+                f.write(f"\nLLM_PROVIDER=gemini\nOPENROUTER_API_KEY={key}\n")
+            console.print("[green]Stored securely in .env[/]")
+        elif provider:
+            console.print("[yellow]Ollama not installed locally — instructions below[/]")
+
+        start_containers = questionary.confirm("Start containers now? (run ./run.sh up)").ask()
+        if start_containers:
+            console.print("[bold green]Starting containers...[/]")
+            os.system("./run.sh up")
+
+    # TUI Menu
+    choice = questionary.select(
+        "ETHIO-RTAP — choose action:",
+        choices=[
+            "auth login",
+            "graph stats",
+            "ingest bloodhound",
+            "plan generate",
+            "actors list",
+            "score paths",
+            "manage tenants",
+            "view status",
+        ],
+    ).ask()
+
+    if not choice:
+        return
+
+    if choice == "ingest bloodhound":
+        zip_path = questionary.text("Path to SharpHound .zip:").ask()
+        if zip_path:
+            ingest_bloodhound(zip_path=zip_path)
+    elif choice == "auth login":
+        auth_login()
+    elif choice == "graph stats":
+        graph_stats()
+    elif choice == "actors list":
+        actors_list()
+    elif choice == "plan generate":
+        src = questionary.text("Source node (e.g. USER@DOMAIN):").ask()
+        dst = questionary.text("Target node (e.g. COMPUTER.DOMAIN):").ask()
+        if src and dst:
+            plan_generate(source=src, target=dst)
+    elif choice == "score paths":
+        src = questionary.text("Source node (e.g. USER@DOMAIN):").ask()
+        dst = questionary.text("Target node (e.g. COMPUTER.DOMAIN):").ask()
+        if src and dst:
+            paths_cmd(source=src, target=dst)
+    else:
+        console.print(f"[bold blue]{choice}[/] — call via direct subcommand: rtap {choice}")
+
+
+@app.callback(invoke_without_command=True)
+def main_callback(ctx: typer.Context) -> None:
+    """Root callback: launch interactive TUI if invoked with no subcommand."""
+    if ctx.invoked_subcommand is None:
+        run_tui()
 
 
 # =============================================================================

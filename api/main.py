@@ -17,7 +17,7 @@ from slowapi.util import get_remote_address
 from slowapi.errors import RateLimitExceeded
 from contextlib import asynccontextmanager
 
-from graph.connection import driver
+from graph.connection import get_driver
 from etl.bloodhound import ingest_bloodhound as ingest_data
 from llm.planner import find_and_score_paths, generate_campaign_plan
 from config import ALLOWED_ORIGINS
@@ -139,7 +139,7 @@ async def logout(request: Request, user: AuthenticatedUser = Depends(get_current
 @limiter.limit("60/minute")
 async def health(request: Request):
     try:
-        async with driver.session() as session:
+        async with get_driver().session() as session:
             await session.run("RETURN 1")
         return {"status": "ok", "neo4j": True, "timestamp": datetime.utcnow().isoformat()}
     except Exception as e:
@@ -152,19 +152,21 @@ async def health(request: Request):
 @limiter.limit("30/minute")
 async def graph_stats(request: Request, user: AuthenticatedUser = Depends(get_current_user)):
     try:
-        async with driver.session() as session:
+        async with get_driver().session() as session:
             node_result = await session.run("""
                 MATCH (n)
+                WHERE n.org_id = $org_id
                 RETURN labels(n)[0] AS type, count(n) AS count
                 ORDER BY count DESC
-            """)
+            """, org_id=user.org_id)
             nodes = {r["type"]: r["count"] async for r in node_result}
 
             rel_result = await session.run("""
-                MATCH ()-[r]->()
+                MATCH (s)-[r]->(t)
+                WHERE s.org_id = $org_id AND t.org_id = $org_id
                 RETURN type(r) AS type, count(r) AS count
                 ORDER BY count DESC
-            """)
+            """, org_id=user.org_id)
             relationships = {r["type"]: r["count"] async for r in rel_result}
 
             return {"nodes": nodes, "relationships": relationships}
@@ -314,7 +316,7 @@ async def gnn_status(
 @limiter.limit("30/minute")
 async def get_actors(request: Request, user: AuthenticatedUser = Depends(get_current_user)):
     try:
-        async with driver.session() as session:
+        async with get_driver().session() as session:
             result = await session.run("""
                 MATCH (a:ThreatActor)
                 OPTIONAL MATCH (a)-[:USES]->(t:Technique)
