@@ -3,33 +3,35 @@
 gnn/embeddings.py — Generate Node2Vec embeddings for the knowledge graph
 
 Uses PyTorch Geometric's Node2Vec (compatible with existing torch/torch-geometric install).
-Pulls the full graph from Neo4j, builds a PyG Data object, runs Node2Vec
+Pulls the tenant-scoped graph from Neo4j, builds a PyG Data object, runs Node2Vec
 to generate 128-dim embeddings for every node, stores embeddings back
 as node properties in Neo4j.
 
-Run: python gnn/embeddings.py
+Run: python gnn/embeddings.py --org_id <ORG_ID> --engagement_id <ENGAGEMENT_ID>
 """
 
+import argparse
+import asyncio
 import torch
 import torch.nn.functional as F
-from torch_geometric.nn import Node2Vec
-from torch_geometric.data import Data
-from graph.connection import driver
 import networkx as nx
 
+from graph.tenant_session import TenantSession
 
-def fetch_graph_from_neo4j():
-    """Pull all nodes and relationships from Neo4j and build a NetworkX graph."""
-    print("Fetching graph from Neo4j...")
+
+async def fetch_graph_from_neo4j(org_id: str, engagement_id: str):
+    """Pull all nodes and relationships from Neo4j scoped to one tenant+engagement and build a NetworkX graph."""
+    print(f"Fetching graph from Neo4j for org={org_id}, engagement={engagement_id}...")
     
     G = nx.Graph()
     node_to_idx = {}
     idx_to_node = {}
     
-    with driver.session() as session:
+    async with TenantSession(org_id=org_id, engagement_id=engagement_id) as ts:
         # Get all nodes with their appropriate ID field
-        nodes_result = session.run("""
+        nodes_result = await ts.run("""
             MATCH (n)
+            WHERE n.org_id = $org_id AND n.engagement_id = $engagement_id
             RETURN 
                 CASE 
                     WHEN n.objectid IS NOT NULL THEN n.objectid
@@ -42,7 +44,7 @@ def fetch_graph_from_neo4j():
         """)
         
         node_count = 0
-        for record in nodes_result:
+        async for record in nodes_result:
             objectid = record["objectid"]
             labels = record["labels"]
             name = record["name"]
@@ -57,9 +59,11 @@ def fetch_graph_from_neo4j():
         
         print(f"  Nodes loaded: {node_count}")
         
-        # Get all relationships
-        rels_result = session.run("""
+        # Get all relationships - scoped to same tenant+engagement on both ends
+        rels_result = await ts.run("""
             MATCH (s)-[r]->(t)
+            WHERE s.org_id = $org_id AND s.engagement_id = $engagement_id
+              AND t.org_id = $org_id AND t.engagement_id = $engagement_id
             RETURN 
                 CASE 
                     WHEN s.objectid IS NOT NULL THEN s.objectid
@@ -77,7 +81,7 @@ def fetch_graph_from_neo4j():
         """)
         
         rel_count = 0
-        for record in rels_result:
+        async for record in rels_result:
             source = record["source"]
             target = record["target"]
             rel_type = record["rel_type"]
@@ -92,8 +96,8 @@ def fetch_graph_from_neo4j():
 
 
 def build_pyg_data(G, node_to_idx):
-    """Convert NetworkX graph to PyTorch Geometric Data object."""
-    print("Building PyG Data object...")
+    """Convert NetworkX graph to simple data object with edge_index and num_nodes."""
+    print("Building PyG-style Data object...")
     
     num_nodes = G.number_of_nodes()
     edge_list = []
@@ -106,9 +110,12 @@ def build_pyg_data(G, node_to_idx):
     
     edge_index = torch.tensor(edge_list, dtype=torch.long).t().contiguous()
     
-    data = Data(edge_index=edge_index, num_nodes=num_nodes)
+    class SimpleData:
+        pass
+    data = SimpleData()
+    data.edge_index = edge_index
+    data.num_nodes = num_nodes
     print(f"  Nodes: {num_nodes}, Edges: {edge_index.size(1)}")
-    
     return data
 
 
@@ -121,47 +128,88 @@ def run_node2vec(data, dimensions=128, walk_length=20, num_walks=80,
     device = 'cuda' if torch.cuda.is_available() else 'cpu'
     print(f"  Using device: {device}")
     
-    model = Node2Vec(
-        data.edge_index,
-        embedding_dim=dimensions,
-        walk_length=walk_length,
-        context_size=8,
-        walks_per_node=num_walks,
-        num_negative_samples=3,
-        p=p,
-        q=q,
-        sparse=True
-    ).to(device)
+    # Pure-PyTorch Node2Vec (DeepWalk-style uniform walks, skip-gram with neg sampling)
+    device = 'cuda' if torch.cuda.is_available() else 'cpu'
+    num_nodes = data.num_nodes
+    edge_index = data.edge_index
+    adj = [[] for _ in range(num_nodes)]
+    for i in range(edge_index.size(1)):
+        u = edge_index[0, i].item(); v = edge_index[1, i].item()
+        adj[u].append(v)
     
-    data = data.to(device)
+    # Random walks (uniform, p=q=1)
+    walks = []
+    for _ in range(num_walks):
+        for node in range(num_nodes):
+            walk = [node]
+            for _ in range(walk_length - 1):
+                neighs = adj[walk[-1]]
+                if not neighs: break
+                walk.append(neighs[int(torch.randint(len(neighs), (1,)).item())])
+            walks.append(walk)
     
-    loader = model.loader(batch_size=batch_size, shuffle=True, num_workers=0)
-    optimizer = torch.optim.SparseAdam(list(model.parameters()), lr=lr)
-    
-    model.train()
+    context_size = 8
+    print("  Walks generated, building pairs...")
+    # Build all positive (center, context) pairs across all walks, once
+    pairs = []
+    for widx, walk in enumerate(walks):
+        if widx % 2000 == 0 and widx > 0:
+            print(f"    pair-building progress: {widx}/{len(walks)} walks, {len(pairs)} pairs so far")
+        for i, node in enumerate(walk):
+            start = max(0, i - context_size)
+            end = min(len(walk), i + context_size + 1)
+            for j in range(start, end):
+                if i == j:
+                    continue
+                pairs.append((node, walk[j]))
+
+    pairs = torch.tensor(pairs, dtype=torch.long, device=device)  # [P, 2]
+    print(f"  Total training pairs: {pairs.size(0)}")
+
+    emb_table = torch.nn.Embedding(num_nodes, dimensions, sparse=True).to(device)
+    optimizer = torch.optim.SparseAdam(emb_table.parameters(), lr=lr)
+
+    batch_size = 2048
+    neg_samples = 3
+    emb_table.train()
     for epoch in range(1, epochs + 1):
-        total_loss = 0
-        for pos_rw, neg_rw in loader:
+        perm = torch.randperm(pairs.size(0), device=device)
+        total_loss = 0.0
+        num_batches = 0
+        for start_idx in range(0, pairs.size(0), batch_size):
+            batch_idx = perm[start_idx:start_idx + batch_size]
+            batch = pairs[batch_idx]  # [B, 2]
+            B = batch.size(0)
+
+            neg = torch.randint(0, num_nodes, (B, neg_samples), device=device)  # [B, neg_samples]
+
             optimizer.zero_grad()
-            loss = model.loss(pos_rw.to(device), neg_rw.to(device))
+            u = emb_table(batch[:, 0])       # [B, dim]
+            v_pos = emb_table(batch[:, 1])   # [B, dim]
+            v_neg = emb_table(neg)           # [B, neg_samples, dim]
+
+            score_pos = (u * v_pos).sum(dim=1)                          # [B]
+            score_neg = torch.bmm(v_neg, u.unsqueeze(2)).squeeze(2)     # [B, neg_samples]
+
+            loss = -torch.log(torch.sigmoid(score_pos) + 1e-8).mean() \
+                   - torch.log(1 - torch.sigmoid(score_neg) + 1e-8).mean()
+
             loss.backward()
             optimizer.step()
             total_loss += loss.item()
-        
-        if epoch % 1 == 0 or epoch == 1 or epoch == epochs:
-            print(f"  Epoch {epoch:3d}/{epochs} — Loss: {total_loss:.4f}")
+            num_batches += 1
+
+        print(f"  Epoch {epoch}/{epochs} — avg loss: {total_loss / max(num_batches,1):.4f}")
     
-    # Get embeddings for all nodes
-    model.eval()
+    emb_table.eval()
     with torch.no_grad():
-        embeddings = model(torch.arange(data.num_nodes, device=device))
-    
+        embeddings = emb_table(torch.arange(num_nodes, device=device))
     return embeddings.cpu()
 
 
-def store_embeddings_in_neo4j(embeddings, idx_to_node, dimensions=128):
-    """Store the learned embeddings back to Neo4j as node properties."""
-    print("Storing embeddings in Neo4j...")
+async def store_embeddings_in_neo4j(embeddings, idx_to_node, org_id: str, engagement_id: str, dimensions=128):
+    """Store the learned embeddings back to Neo4j as node properties, scoped to tenant+engagement."""
+    print(f"Storing embeddings in Neo4j for org={org_id}, engagement={engagement_id}...")
     
     batch = []
     for idx in range(embeddings.size(0)):
@@ -172,7 +220,7 @@ def store_embeddings_in_neo4j(embeddings, idx_to_node, dimensions=128):
             "embedding": embedding
         })
     
-    with driver.session() as session:
+    async with TenantSession(org_id=org_id, engagement_id=engagement_id) as ts:
         batch_size = 500
         updated = 0
         
@@ -182,29 +230,33 @@ def store_embeddings_in_neo4j(embeddings, idx_to_node, dimensions=128):
             query = """
             UNWIND $batch AS item
             MATCH (n)
-            WHERE 
-                n.objectid = item.objectid 
-                OR n.actor_id = item.objectid 
-                OR n.technique_id = item.objectid 
-                OR n.name = item.objectid
+            WHERE
+                (n.objectid = item.objectid
+                 OR n.actor_id = item.objectid
+                 OR n.technique_id = item.objectid
+                 OR n.name = item.objectid)
+                AND n.org_id = $org_id
+                AND n.engagement_id = $engagement_id
             SET n.embedding = item.embedding,
                 n.embedding_dim = $dimensions
             """
             
-            session.run(query, batch=chunk, dimensions=dimensions)
+            await ts.run(query, batch=chunk, dimensions=dimensions)
             updated += len(chunk)
             print(f"  Updated {updated}/{len(batch)} nodes...")
         
         print(f"  All {updated} embeddings stored")
 
 
-def main():
+async def run_embeddings(org_id: str, engagement_id: str):
     print("=" * 60)
-    print("GNN Embeddings Generation — PyG Node2Vec")
+    print("GNN Embeddings Generation — Pure-PyTorch Node2Vec (no pyg-lib)")
+    print(f"  org_id: {org_id}")
+    print(f"  engagement_id: {engagement_id}")
     print("=" * 60)
     
-    # 1. Fetch graph from Neo4j
-    G, node_to_idx, idx_to_node = fetch_graph_from_neo4j()
+    # 1. Fetch graph from Neo4j (tenant-scoped)
+    G, node_to_idx, idx_to_node = await fetch_graph_from_neo4j(org_id, engagement_id)
     
     if G.number_of_nodes() == 0:
         print("ERROR: No nodes found in graph. Run ETL first.")
@@ -216,22 +268,33 @@ def main():
     # 3. Run Node2Vec
     embeddings = run_node2vec(data)
     
-    # 4. Store embeddings back to Neo4j
-    store_embeddings_in_neo4j(embeddings, idx_to_node)
+    # 4. Store embeddings back to Neo4j (tenant-scoped)
+    await store_embeddings_in_neo4j(embeddings, idx_to_node, org_id, engagement_id)
     
     print("\n" + "=" * 60)
     print("Embeddings generation complete!")
     print("=" * 60)
     
     # Quick verification
-    with driver.session() as session:
-        result = session.run("""
+    async with TenantSession(org_id=org_id, engagement_id=engagement_id) as ts:
+        result = await ts.run("""
             MATCH (n) 
             WHERE n.embedding IS NOT NULL 
+              AND n.org_id = $org_id 
+              AND n.engagement_id = $engagement_id
             RETURN count(n) AS count, size(n.embedding) AS dim
-        """)
-        record = result.single()
+        """, org_id=org_id, engagement_id=engagement_id)
+        record = await result.single()
         print(f"Verification: {record['count']} nodes have {record['dim']}-dim embeddings")
+
+
+def main():
+    parser = argparse.ArgumentParser(description="Generate Node2Vec embeddings for tenant-scoped graph")
+    parser.add_argument("--org_id", required=True, help="Organization ID (tenant)")
+    parser.add_argument("--engagement_id", required=True, help="Engagement ID")
+    args = parser.parse_args()
+    
+    asyncio.run(run_embeddings(args.org_id, args.engagement_id))
 
 
 if __name__ == "__main__":

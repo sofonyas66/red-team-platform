@@ -7,7 +7,7 @@ Direct driver.session() calls are only permitted in:
   (schema bootstrap — not per-tenant).
 """
 import logging
-from graph.connection import driver
+from graph.connection import get_driver
 
 logger = logging.getLogger(__name__)
 
@@ -52,7 +52,7 @@ class TenantSession:
 
     # ── Async context manager ──────────────────────────────────────────────
     async def __aenter__(self):
-        self._session = driver.session()
+        self._session = get_driver().session()
         return self
 
     async def __aexit__(self, *exc):
