@@ -62,7 +62,7 @@ class LLMProvider:
             import httpx
             self.client = httpx.Client(timeout=60.0)
             self.backend = "gemini"
-            self.model = "gemini-2.5-flash"
+            self.model = "gemini-flash-latest"
             print(f"[LLMProvider] Using Gemini ({self.model})")
         elif self.openrouter_key:
             import httpx

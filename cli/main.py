@@ -636,9 +636,9 @@ def run_tui() -> None:
             default="Gemini (via OpenRouter)",
         ).ask()
         if provider and "Gemini" in provider:
-            key = questionary.password("OpenRouter API Key:").ask()
+            key = questionary.password("Gemini API Key:").ask()
             with open(".env", "a") as f:
-                f.write(f"\nLLM_PROVIDER=gemini\nOPENROUTER_API_KEY={key}\n")
+                f.write(f"\nLLM_PROVIDER=api\nGEMINI_API_KEY={key}\n")
             console.print("[green]Stored securely in .env[/]")
         elif provider:
             console.print("[yellow]Ollama not installed locally — instructions below[/]")
