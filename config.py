@@ -19,13 +19,10 @@ NEO4J_PASSWORD = os.getenv("NEO4J_PASSWORD", "changeme")  # dev-only fallback
 # ── Auth ──────────────────────────────────────────────────────────────────
 JWT_SECRET_KEY = os.getenv("JWT_SECRET_KEY")
 
-# ── LLM Provider / API Keys (install-time prompts) ─────────────────────────
-LLM_PROVIDER = os.getenv("LLM_PROVIDER", "gemini")  # gemini / ollama
-OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY")  # Gemini via OpenRouter
-OLLAMA_URL = os.getenv("OLLAMA_URL", "http://localhost:11434")  # Ollama offline
-GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
-ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY")
-OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
+# ── LLM Provider (OpenAI-compatible interface) ────────────────────────────
+LLM_BASE_URL = os.getenv("LLM_BASE_URL")
+LLM_API_KEY = os.getenv("LLM_API_KEY")
+LLM_MODEL_NAME = os.getenv("LLM_MODEL_NAME")
 
 # ── CORS ──────────────────────────────────────────────────────────────────
 ALLOWED_ORIGINS = os.getenv("ALLOWED_ORIGINS", "http://localhost:3000").split(",")

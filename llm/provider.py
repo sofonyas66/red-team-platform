@@ -1,12 +1,17 @@
 """
-llm/provider.py — LLM abstraction layer
+llm/provider.py — Unified OpenAI-compatible LLM client
 
-All LLM calls in the project go through this module. Switching from
-cloud API to local Ollama is a one-line env change: LLM_PROVIDER=ollama
+All LLM calls in the project go through this module. The backend is
+configured via LLM_BASE_URL which points to either OpenRouter (cloud) or
+Ollama (local). Both support the standard chat.completions.create()
+interface.
 
-Supported providers:
-  - "api"    → Anthropic (claude-sonnet-4-6) or OpenAI (gpt-4o-mini)
-  - "ollama" → Local Ollama server (llama3.1)
+Configuration via .env:
+  - LLM_BASE_URL:  https://openrouter.ai/api/v1  (OpenRouter cloud)
+                  or http://localhost:11434/v1  (Ollama local)
+  - LLM_API_KEY:   OpenRouter real key, or "ollama" for local
+  - LLM_MODEL_NAME:meta-llama/llama-3-8b-instruct:free (OpenRouter)
+                   or llama3 (Ollama)
 """
 
 import os
@@ -19,79 +24,34 @@ load_dotenv(_env_path)
 
 
 class LLMProvider:
-    """Unified interface to cloud and local LLM backends."""
+    """Unified interface to OpenAI-compatible LLM backends.
 
-    def __init__(self, provider: str | None = None):
-        self.provider = provider or os.environ.get("LLM_PROVIDER", "api")
+    The provider uses a single OpenAI client configured via
+    LLM_BASE_URL, LLM_API_KEY, and LLM_MODEL_NAME environment variables.
+    """
 
-        if self.provider == "api":
-            self._init_api()
-        elif self.provider == "ollama":
-            self._init_ollama()
-        else:
-            raise ValueError(f"Unknown LLM provider: {self.provider}")
+    def __init__(self):
+        # Validate required environment variables
+        self.base_url = os.environ.get("LLM_BASE_URL")
+        if not self.base_url:
+            raise RuntimeError("LLM_BASE_URL is not set in .env")
 
-    # ------------------------------------------------------------------
-    # Initialization helpers
-    # ------------------------------------------------------------------
+        self.api_key = os.environ.get("LLM_API_KEY")
+        if not self.api_key:
+            raise RuntimeError("LLM_API_KEY is not set in .env")
 
-    def _init_api(self):
-        """Set up Anthropic, OpenAI, OpenRouter, or Gemini client based on available keys."""
-        self.api_key = os.environ.get("ANTHROPIC_API_KEY")
-        self.openai_key = os.environ.get("OPENAI_API_KEY")
-        self.openrouter_key = os.environ.get("OPENROUTER_API_KEY")
-        self.gemini_key = os.environ.get("GEMINI_API_KEY")
+        self.model_name = os.environ.get("LLM_MODEL_NAME")
+        if not self.model_name:
+            raise RuntimeError("LLM_MODEL_NAME is not set in .env")
 
-        # If they put the Gemini key in OPENROUTER_API_KEY, detect it
-        if not self.gemini_key and self.openrouter_key and not self.openrouter_key.startswith("sk-or-"):
-            self.gemini_key = self.openrouter_key
-
-        if self.api_key:
-            import anthropic
-            self.client = anthropic.Anthropic(api_key=self.api_key)
-            self.backend = "anthropic"
-            self.model = "claude-sonnet-4-6"
-            print(f"[LLMProvider] Using Anthropic ({self.model})")
-        elif self.openai_key:
-            from openai import OpenAI
-            self.client = OpenAI(api_key=self.openai_key)
-            self.backend = "openai"
-            self.model = "gpt-4o-mini"
-            print(f"[LLMProvider] Using OpenAI ({self.model})")
-        elif self.gemini_key:
-            import httpx
-            self.client = httpx.Client(timeout=60.0)
-            self.backend = "gemini"
-            self.model = "gemini-flash-latest"
-            print(f"[LLMProvider] Using Gemini ({self.model})")
-        elif self.openrouter_key:
-            import httpx
-            self.client = httpx.Client(timeout=60.0)
-            self.backend = "openrouter"
-            self.model = "google/gemini-2.5-flash:free"
-            print(f"[LLMProvider] Using OpenRouter ({self.model})")
-        else:
-            self.client = None
-            self.backend = None
-            print("[LLMProvider] WARNING: No API key found. "
-                  "Set ANTHROPIC_API_KEY, OPENAI_API_KEY, GEMINI_API_KEY, or OPENROUTER_API_KEY in .env")
-
-    def _init_ollama(self):
-        """Set up local Ollama client."""
-        try:
-            import ollama
-            self.client = ollama
-            self.backend = "ollama"
-            self.model = "llama3.1"
-            print(f"[LLMProvider] Using Ollama ({self.model})")
-        except ImportError:
-            raise ImportError(
-                "Ollama package not installed. Run: pip install ollama"
-            )
-
-    # ------------------------------------------------------------------
-    # Generation
-    # ------------------------------------------------------------------
+        # Import and configure OpenAI client with explicit timeout
+        from openai import OpenAI
+        self.client = OpenAI(
+            base_url=self.base_url,
+            api_key=self.api_key,
+            timeout=120.0  # Explicit timeout to prevent hanging
+        )
+        print(f"[LLMProvider] Using model {self.model_name} @ {self.base_url}")
 
     def generate(self, prompt: str, max_tokens: int = 500) -> str:
         """
@@ -105,87 +65,18 @@ class LLMProvider:
             The generated text.
 
         Raises:
-            RuntimeError: If no backend is configured or call fails.
+            RuntimeError: If the call fails.
         """
-        if self.provider == "api":
-            return self._generate_api(prompt, max_tokens)
-        elif self.provider == "ollama":
-            return self._generate_ollama(prompt)
-        else:
-            raise RuntimeError(f"No generation method for provider: {self.provider}")
-
-    def _generate_api(self, prompt: str, max_tokens: int) -> str:
-        """Call Anthropic, OpenAI, OpenRouter, or Gemini API."""
-        if self.client is None:
-            raise RuntimeError(
-                "No API key configured. Set ANTHROPIC_API_KEY, "
-                "OPENAI_API_KEY, GEMINI_API_KEY, or OPENROUTER_API_KEY in your .env file."
-            )
-
-        if self.backend == "anthropic":
-            response = self.client.messages.create(
-                model=self.model,
-                max_tokens=max_tokens,
-                messages=[{"role": "user", "content": prompt}],
-            )
-            return response.content[0].text
-
-        elif self.backend == "openai":
+        try:
             response = self.client.chat.completions.create(
-                model=self.model,
-                max_tokens=max_tokens,
+                model=self.model_name,
                 messages=[{"role": "user", "content": prompt}],
+                max_tokens=max_tokens,
+                temperature=0.3
             )
             return response.choices[0].message.content
-
-        elif self.backend == "gemini":
-            url = f"https://generativelanguage.googleapis.com/v1beta/models/{self.model}:generateContent?key={self.gemini_key}"
-            payload = {
-                "contents": [{"parts": [{"text": prompt}]}],
-                "generationConfig": {
-                    "maxOutputTokens": max_tokens,
-                    "temperature": 0.3
-                }
-            }
-            response = self.client.post(url, json=payload)
-            response.raise_for_status()
-            data = response.json()
-            try:
-                return data["candidates"][0]["content"]["parts"][0]["text"]
-            except (KeyError, IndexError):
-                raise RuntimeError(f"Unexpected Gemini API response format: {data}")
-
-        elif self.backend == "openrouter":
-            headers = {
-                "Authorization": f"Bearer {self.openrouter_key}",
-                "Content-Type": "application/json",
-                "HTTP-Referer": "https://github.com/sofonyas66/red-team-platform",
-                "X-Title": "Red Team Planning Platform"
-            }
-            payload = {
-                "model": self.model,
-                "messages": [
-                    {"role": "user", "content": prompt}
-                ],
-                "max_tokens": max_tokens,
-                "temperature": 0.3
-            }
-            response = self.client.post(
-                "https://openrouter.ai/api/v1/chat/completions",
-                headers=headers,
-                json=payload
-            )
-            response.raise_for_status()
-            data = response.json()
-            return data["choices"][0]["message"]["content"]
-
-    def _generate_ollama(self, prompt: str) -> str:
-        """Call local Ollama server."""
-        response = self.client.chat(
-            model=self.model,
-            messages=[{"role": "user", "content": prompt}],
-        )
-        return response["message"]["content"]
+        except Exception as e:
+            raise RuntimeError(f"LLM API call failed: {e}") from e
 
 
 # ------------------------------------------------------------------
