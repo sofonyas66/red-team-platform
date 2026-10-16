@@ -2,4 +2,4 @@
 # Determine directory of this script
 DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" >/dev/null 2>&1 && pwd )"
 # Execute using virtual environment Python interpreter
-exec "$DIR/venv/bin/rtap" "$@"
+exec "$DIR/.venv/bin/rtap" "$@"

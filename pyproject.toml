@@ -32,7 +32,6 @@ dependencies = [
     "rich",
     "stix2",
     "qdrant-client",
-    "anthropic",
     "openai",
     # numpy is required by neo4j (optional codec path) and qdrant-client (hard dep) —
     # NOT ML-only. On pre-AVX2 CPUs (e.g. Core 2 Duo), the default PyPI wheel will
