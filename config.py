@@ -5,6 +5,12 @@ All modules should import from here rather than calling os.getenv directly,
 so that the startup guards fire at import time (i.e. before the first request).
 """
 import os
+from pathlib import Path
+from dotenv import load_dotenv
+
+# Load .env file from project root
+_env_path = Path(__file__).resolve().parent / ".env"
+load_dotenv(_env_path)
 
 ENV = os.getenv("ENV", "development")
 
