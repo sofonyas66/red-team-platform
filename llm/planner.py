@@ -175,15 +175,30 @@ async def generate_campaign_plan(source: str, target: str, org_id: str, engageme
         return _templated_plan(scored_paths)
 
 
+def _extract_domain(node_name: str) -> str:
+    """Extract domain suffix from a node name (e.g. USER@DOMAIN or HOST.DOMAIN.LOCAL)."""
+    if not node_name:
+        return "UNKNOWN"
+    if "@" in node_name:
+        return node_name.split("@")[-1]
+    if "." in node_name:
+        parts = node_name.split(".")
+        if len(parts) > 1:
+            return ".".join(parts[1:])
+    return node_name
+
+
 def _templated_plan(scored_paths: List[Dict[str, Any]]) -> str:
     """Fallback templated plan when LLM is unavailable."""
     top_path = scored_paths[0]
     path_nodes = top_path['nodes']
+    target_node = path_nodes[-1] if path_nodes else ""
+    domain = _extract_domain(target_node)
     
     return f"""[LLM unavailable — showing templated plan]
 
 === CAMPAIGN PLAN ===
-Target Domain: ETHBANK.LOCAL
+Target Domain: {domain}
 Method: Templated Fallback
 
 1. PHASE 1 — Initial Access
