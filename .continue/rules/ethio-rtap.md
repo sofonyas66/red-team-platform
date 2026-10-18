@@ -297,3 +297,5 @@ Key variables in `.env` file:
 - Set up monitoring and logging (ELK stack, Prometheus/Grafana)
 - Implement rate limiting and DDoS protection
 - Regular backup strategies for Neo4j and PostgreSQL
+## Precedence
+11. If any other loaded rule (planning workflow, communication style, etc.) conflicts with this file, THIS FILE WINS. Do not write plan-and-approve proposals ("Understanding / Proposed Steps / Do you approve?") unless the task card says PLAN FIRST. Otherwise execute the card and report in the report format above.
