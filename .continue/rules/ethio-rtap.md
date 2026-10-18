@@ -297,5 +297,9 @@ Key variables in `.env` file:
 - Set up monitoring and logging (ELK stack, Prometheus/Grafana)
 - Implement rate limiting and DDoS protection
 - Regular backup strategies for Neo4j and PostgreSQL
-## Precedence
-11. If any other loaded rule (planning workflow, communication style, etc.) conflicts with this file, THIS FILE WINS. Do not write plan-and-approve proposals ("Understanding / Proposed Steps / Do you approve?") unless the task card says PLAN FIRST. Otherwise execute the card and report in the report format above.
+
+## Precedence over other loaded rules
+11. If any other loaded rule (planning workflow, communication style) conflicts with this file, THIS FILE WINS. In particular:
+  a) Reading is always allowed without approval: Read, List, grep, git status/diff/log, and the standard checks. Do all of it BEFORE planning. A plan that cites a line or function you have not read is invalid.
+  b) Only cards marked PLAN FIRST need a plan and an "Approved" reply before any edit. For those: send Understanding, Proposed Steps (exact edits), Files Affected, then stop. Cards without that mark: execute and report, no approval step.
+  c) Narration: at most one sentence before a tool call. Do not stop and wait after a progress update. The final message uses the report format above.
