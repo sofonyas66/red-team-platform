@@ -13,11 +13,10 @@ from sqlalchemy import create_engine, select
 from sqlalchemy.orm import Session
 from sqlalchemy.exc import IntegrityError
 
-from config import DATABASE_URL
+from config import _sync_url
 from db.models import IngestionRecord, IngestionStatus
 
-# Convert async URL to sync for SQLAlchemy sync operations
-_sync_url = DATABASE_URL.replace("+asyncpg", "+psycopg2").replace("postgresql+asyncpg", "postgresql+psycopg2")
+# Sync engine for ingestion operations (reuses config's _sync_url)
 _engine = create_engine(_sync_url, pool_pre_ping=True)
 
 

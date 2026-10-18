@@ -54,3 +54,12 @@ data/*.zip
 gnn/cache/*/
 !gnn/cache/path_gat.pt
 !gnn/cache/graph_tensors.pt
+**/gnn/cache/*/
+*.bak
+*.before-fix
+*.pre-me
+*.incident-backup
+*.pid
+token.json
+*.pid
+token.json

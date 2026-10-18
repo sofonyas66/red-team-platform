@@ -56,12 +56,7 @@ async def find_and_score_paths(source: str, target: str, org_id: str, engagement
     """
     Find paths from source (User) to target (Computer) and score them using PathGAT.
     """
-    from gnn.init_gat import score_candidate_path, get_gat_state  # lazy ML import
     from graph.tenant_session import TenantSession
-
-    # Get GAT state for this tenant
-    state = await get_gat_state(org_id, engagement_id)
-    name_to_idx = state["name_to_idx"]
 
     async with TenantSession(org_id=org_id, engagement_id=engagement_id) as ts:
         query = """
@@ -82,10 +77,14 @@ async def find_and_score_paths(source: str, target: str, org_id: str, engagement
         return []
 
     scored_paths = []
+    from gnn.init_gat import score_candidate_path  # lazy ML import
     for path in paths:
         nodes_list = path["path_nodes"]
         rels_list = path["rel_types"]
-        gat_score = await score_candidate_path(nodes_list, rels_list, org_id, engagement_id)
+        try:
+            gat_score = await score_candidate_path(nodes_list, rels_list, org_id, engagement_id)
+        except Exception as e:
+            gat_score = 0.5
         scored_paths.append({
             "score": gat_score,
             "nodes": nodes_list,

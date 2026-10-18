@@ -33,6 +33,12 @@ LLM_MODEL_NAME = os.getenv("LLM_MODEL_NAME")
 # ── CORS ──────────────────────────────────────────────────────────────────
 ALLOWED_ORIGINS = os.getenv("ALLOWED_ORIGINS", "http://localhost:3000").split(",")
 
+# ── Sync URL for SQLAlchemy sessions (used in auth, ingestion ops, etc.) ───
+if DATABASE_URL:
+    _sync_url = DATABASE_URL.replace("+asyncpg", "")
+else:
+    _sync_url = None
+
 # ── Startup guards (non-development only) ─────────────────────────────────
 if ENV != "development":
     if not JWT_SECRET_KEY:

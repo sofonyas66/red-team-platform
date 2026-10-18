@@ -17,7 +17,7 @@ from passlib.context import CryptContext
 from sqlalchemy import create_engine, select
 from sqlalchemy.orm import Session
 
-from config import DATABASE_URL, JWT_SECRET_KEY, ENV
+from config import DATABASE_URL, JWT_SECRET_KEY, ENV, _sync_url
 from db.models import User as UserModel
 
 # ── Crypto ────────────────────────────────────────────────────────────────
@@ -34,9 +34,7 @@ ACCESS_TOKEN_EXPIRE_MINUTES = 60 * 24  # 24 hours
 security = HTTPBearer(auto_error=False)
 
 # ── SQLAlchemy sync engine (used only for auth lookups) ───────────────────
-# asyncpg is the async driver; for the sync auth path we use psycopg2-style
-# URL or fall back to a no-op engine in dev when DATABASE_URL is unset.
-_sync_url = (DATABASE_URL or "").replace("+asyncpg", "") if DATABASE_URL else None
+# Use the shared sync URL from config
 _engine = create_engine(_sync_url, pool_pre_ping=True) if _sync_url else None
 
 

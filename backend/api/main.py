@@ -2,6 +2,11 @@
 api/main.py — FastAPI application for Red Team Planning Platform (Production-ready)
 """
 import os
+import uuid
+from fastapi import Form, Body
+from sqlalchemy.exc import IntegrityError
+from sqlalchemy.orm import Session
+from sqlalchemy import select
 import hashlib
 import tempfile
 import zipfile
@@ -20,7 +25,7 @@ from contextlib import asynccontextmanager
 from graph.connection import get_driver
 from etl.bloodhound import ingest_bloodhound as ingest_data
 from llm.planner import find_and_score_paths, generate_campaign_plan
-from config import ALLOWED_ORIGINS
+from config import ALLOWED_ORIGINS, _sync_url
 from api.auth import (
     get_current_user, require_roles, optional_auth, create_access_token,
     authenticate_user, AuthenticatedUser, TokenData, PUBLIC_PATHS
@@ -29,6 +34,7 @@ from db.ingestion_ops import (
     is_already_ingested as pg_is_already_ingested,
     record_ingestion as pg_record_ingestion,
     get_ingestion_record_by_hash,
+    _engine as _ingestion_engine,
 )
 
 # Rate limiter
@@ -131,9 +137,61 @@ async def logout(request: Request, user: AuthenticatedUser = Depends(get_current
     """
     return {"detail": "Logged out. Token blocklist not yet implemented (Track 1.5 stub)."}
 
+
+@app.get("/me")
+@limiter.limit("10/minute")
+async def get_me(request: Request, user: AuthenticatedUser = Depends(get_current_user)):
+    from db.models import User, Organization
+    with Session(_ingestion_engine) as session:
+        stmt = select(User).where(User.id == uuid.UUID(user.id))
+        db_user = session.scalar(stmt)
+        if not db_user:
+            raise HTTPException(status_code=404, detail="User not found")
+        stmt = select(Organization).where(Organization.id == db_user.org_id)
+        org = session.scalar(stmt)
+        if not org:
+            raise HTTPException(status_code=404, detail="Organization not found")
+        return {
+            "id": str(db_user.id),
+            "email": db_user.email,
+            "role": db_user.role.value,
+            "org_name": org.name
+        }
+
 # =============================================================================
 # Core Endpoints
 # =============================================================================
+
+# END NEW: Engagements endpoints
+
+@app.get("/engagements")
+@limiter.limit("10/minute")
+async def get_engagements(request: Request, user: AuthenticatedUser = Depends(get_current_user)):
+    from db.models import Engagement
+    from sqlalchemy.orm import Session
+    from sqlalchemy import select
+    with Session(_ingestion_engine) as session:
+        stmt = select(Engagement).where(Engagement.org_id == uuid.UUID(user.org_id))
+        engagements = session.scalars(stmt).all()
+    return [
+        {"id": str(e.id), "name": e.name}
+        for e in engagements
+    ]
+
+class CreateEngagementRequest(BaseModel):
+    name: str
+
+@app.post("/engagements")
+@limiter.limit("5/minute")
+async def create_engagement(request: Request, payload: CreateEngagementRequest, user: AuthenticatedUser = Depends(require_roles("org_admin", "operator"))):
+    from db.models import Engagement
+    from sqlalchemy.orm import Session
+    with Session(_ingestion_engine) as session:
+        new = Engagement(org_id=uuid.UUID(user.org_id), name=payload.name, created_by=uuid.UUID(user.id))
+        session.add(new)
+        session.commit()
+        session.refresh(new)
+    return {"id": str(new.id), "name": new.name}
 
 @app.get("/health")
 @limiter.limit("60/minute")
@@ -191,10 +249,21 @@ async def upload_bloodhound(
     request: Request,
     background_tasks: BackgroundTasks,
     file: UploadFile = File(...),
-    engagement_id: str = "",
-    user: AuthenticatedUser = Depends(require_roles("org_admin", "operator"))
-):
+    engagement_id: uuid.UUID = Form(...),
+    user: AuthenticatedUser = Depends(require_roles("org_admin", "operator"))):
+    # Validate engagement belongs to org
+    from db.models import Engagement
+    with Session(_ingestion_engine) as db_session:
+        stmt = select(Engagement).where(Engagement.id == engagement_id,
+                                        Engagement.org_id == uuid.UUID(user.org_id))
+        engagement = db_session.scalar(stmt)
+        if not engagement:
+            raise HTTPException(status_code=404, detail="Engagement not found for your org")
+
+    engagement_id_str = str(engagement_id)
+
     if not file.filename.endswith('.zip'):
+
         raise HTTPException(
             status_code=400,
             detail="File must be a .zip archive of SharpHound JSON exports"
@@ -204,11 +273,7 @@ async def upload_bloodhound(
     content_hash = file_hash(content)
 
     if pg_is_already_ingested(str(user.org_id), content_hash):
-        return IngestResponse(
-            status="skipped",
-            skipped=True,
-            message=f"File already ingested (hash: {content_hash[:16]}...)"
-        )
+        raise HTTPException(status_code=409, detail=f"File already ingested (hash: {content_hash[:16]}...)")
 
     extract_dir = tempfile.mkdtemp(prefix="bloodhound_ingest_")
     zip_path = os.path.join(extract_dir, "upload.zip")
@@ -227,22 +292,25 @@ async def upload_bloodhound(
                 detail="No .json files found in the uploaded zip"
             )
 
-        result = await ingest_data(extract_dir, org_id=str(user.org_id), engagement_id=engagement_id)
+        result = await ingest_data(extract_dir, org_id=str(user.org_id), engagement_id=engagement_id_str)
         total_nodes = sum(result["nodes_ingested"].values())
         total_edges = sum(result["relationships_ingested"].values())
-        pg_record_ingestion(
-            org_id=str(user.org_id),
-            engagement_id=engagement_id,
-            file_hash=content_hash,
-            filename=file.filename,
-            node_count=total_nodes,
-            edge_count=total_edges,
-            ingested_by=str(user.id),
-        )
+        try:
+            pg_record_ingestion(
+                org_id=str(user.org_id),
+                engagement_id=engagement_id_str,
+                file_hash=content_hash,
+                filename=file.filename,
+                node_count=total_nodes,
+                edge_count=total_edges,
+                ingested_by=str(user.id),
+            )
+        except IntegrityError:
+            raise HTTPException(status_code=409, detail="Ingestion record already exists (unique constraint)")
 
         from gnn.init_gat import invalidate_gat_state, retrain_gat_background
-        invalidate_gat_state(org_id=str(user.org_id), engagement_id=engagement_id)
-        background_tasks.add_task(retrain_gat_background, str(user.org_id), engagement_id)
+        invalidate_gat_state(org_id=str(user.org_id), engagement_id=engagement_id_str)
+        background_tasks.add_task(retrain_gat_background, str(user.org_id), engagement_id_str)
 
         return IngestResponse(
             status="success",
