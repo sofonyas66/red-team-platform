@@ -63,3 +63,7 @@ gnn/cache/*/
 token.json
 *.pid
 token.json
+
+
+# CodeWhale agent session state
+.codewhale/
