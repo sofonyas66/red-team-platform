@@ -57,6 +57,10 @@ ml = [
     "sentence-transformers",
     "networkx",
 ]
+dev = [
+    "pytest",
+    "pyflakes",
+]
 
 [project.scripts]
 rtap = "cli.main:app"

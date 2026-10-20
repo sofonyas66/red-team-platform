@@ -123,11 +123,8 @@ api: .env
 	python start_api.py
 
 # Run tests
-test: .env
-	@echo "$(BLUE)Running tests...$(NC)"
-	@make up
-	@sleep 3
-	python -m pytest tests/ -v 2>/dev/null || python -m pytest -v 2>/dev/null || python bootstrap.py
+test:
+	$(realpath ../.venv)/bin/python -m pytest tests/ -v
 
 # Lint code
 lint:
