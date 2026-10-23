@@ -3,30 +3,23 @@
 import { useState, useEffect } from 'react'
 import {
   Activity,
-  AlertTriangle,
   ArrowUpRight,
-  BarChart3,
   Bell,
   ChevronDown,
   CircleHelp,
   Database,
   FileCheck2,
-  FileUp,
   GitBranch,
   LayoutDashboard,
   LogOut,
   Menu,
-  Network,
-  Play,
   Search,
   Settings,
-  ShieldCheck,
   Sparkles,
   Target,
   Upload,
   Users,
   X,
-  Zap,
 } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { useAuth } from '@/lib/auth-context'
@@ -75,7 +68,6 @@ function Sidebar({ collapsed, onToggle, activePage, onNavigate, workspace }: { c
         <button className="nav-item" onClick={logout}><LogOut size={18} />{!collapsed && <span>Logout</span>}</button>
       </nav>
       <div className="sidebar-bottom">
-        <div className="security-card"><ShieldCheck size={18} />{!collapsed && <div><strong>Protected mode</strong><span>All systems secure</span></div>}</div>
         <button className="collapse-button" onClick={onToggle} aria-label="Toggle sidebar"><Menu size={18} />{!collapsed && 'Collapse menu'}</button>
       </div>
     </aside>
@@ -194,19 +186,6 @@ function Dashboard({ workspace, navigate }: { workspace: { email: string } | nul
         </div>
 
         <div className="content-grid">
-          {/* Security posture panel - removed donut and legend, replaced with placeholder */}
-          <section className="panel posture-panel">
-            <div className="panel-header">
-              <div>
-                <h2>Security posture</h2>
-                <p>Risk distribution across your environment</p>
-              </div>
-              <button className="more-button">Last 30 days <ChevronDown size={14} /></button>
-            </div>
-            <div className="posture-body">
-              <div className="placeholder">Security posture visualization requires engagement selection</div>
-            </div>
-          </section>
 
           {/* Recent activity panel */}
           <section className="panel ingestion-panel">
@@ -324,45 +303,6 @@ function Dashboard({ workspace, navigate }: { workspace: { email: string } | nul
             </span>
             <ArrowUpRight size={16} />
           </button>
-          <button disabled>
-            <div className="quick-icon purple"><Play size={19} /></div>
-            <span>
-              <strong>Generate plan</strong><br />
-              <small>Not available yet</small>
-            </span>
-            <ArrowUpRight size={16} />
-          </button>
-          <button disabled>
-            <div className="quick-icon blue"><BarChart3 size={19} /></div>
-            <span>
-              <strong>Analyze paths</strong><br />
-              <small>Not available yet</small>
-            </span>
-            <ArrowUpRight size={16} />
-          </button>
-        </div>
-      </section>
-      <section className="panel coverage-panel">
-        <div className="panel-header">
-          <div>
-            <h2>Collection coverage</h2>
-            <p>Data completeness by source</p>
-          </div>
-          <button className="more-button">Details <ArrowUpRight size={14} /></button>
-        </div>
-        <div className="coverage-stat">
-          <div>
-            <strong>No data yet</strong><span>Overall coverage</span>
-          </div>
-          <span className="positive">+0.0%</span>
-        </div>
-        <div className="coverage-bar">
-          <span />
-        </div>
-        <div className="coverage-labels">
-          <span>Identity <b>No data yet</b></span>
-          <span>Endpoints <b>No data yet</b></span>
-          <span>Cloud <b>No data yet</b></span>
         </div>
       </section>
     </div>
