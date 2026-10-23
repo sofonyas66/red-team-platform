@@ -11,9 +11,9 @@ import hashlib
 import tempfile
 import zipfile
 import shutil
-from typing import List, Dict, Any, Optional
+from typing import List, Dict
 from datetime import datetime
-from fastapi import FastAPI, HTTPException, UploadFile, File, Depends, Request, status, BackgroundTasks
+from fastapi import FastAPI, HTTPException, UploadFile, File, Depends, Request, BackgroundTasks
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
@@ -25,10 +25,11 @@ from contextlib import asynccontextmanager
 from graph.connection import get_driver
 from etl.bloodhound import ingest_bloodhound as ingest_data
 from llm.planner import find_and_score_paths, generate_campaign_plan
-from config import ALLOWED_ORIGINS, _sync_url
+from config import ALLOWED_ORIGINS
 from api.auth import (
     get_current_user, require_roles, optional_auth, create_access_token,
-    authenticate_user, AuthenticatedUser, TokenData, PUBLIC_PATHS
+    authenticate_user, AuthenticatedUser, TokenData, PUBLIC_PATHS,
+    _get_db_session,
 )
 from db.ingestion_ops import (
     is_already_ingested as pg_is_already_ingested,
@@ -36,6 +37,38 @@ from db.ingestion_ops import (
     get_ingestion_record_by_hash,
     _engine as _ingestion_engine,
 )
+
+
+async def require_engagement_ownership(
+    engagement_id: str,
+    user: AuthenticatedUser = Depends(get_current_user),
+) -> str:
+    """
+    FastAPI dependency that validates:
+    1. engagement_id is a valid UUID
+    2. engagement belongs to the user's org_id (tenant isolation)
+    Returns the validated engagement_id string on success.
+    Raises 422 for missing/invalid UUID, 404 for cross-tenant access.
+    """
+    if not engagement_id:
+        raise HTTPException(status_code=422, detail="engagement_id is required")
+    try:
+        engagement_uuid = uuid.UUID(engagement_id)
+    except ValueError:
+        raise HTTPException(status_code=422, detail="engagement_id must be a valid UUID")
+
+    # Check ownership in Postgres
+    from db.models import Engagement
+    with _get_db_session() as db:
+        stmt = select(Engagement).where(
+            Engagement.id == engagement_uuid,
+            Engagement.org_id == uuid.UUID(user.org_id)
+        )
+        engagement = db.scalar(stmt)
+        if not engagement:
+            raise HTTPException(status_code=404, detail="Engagement not found for your org")
+    return engagement_id
+
 
 # Rate limiter
 limiter = Limiter(key_func=get_remote_address)
@@ -208,23 +241,28 @@ async def health(request: Request):
 
 @app.get("/graph/stats")
 @limiter.limit("30/minute")
-async def graph_stats(request: Request, user: AuthenticatedUser = Depends(get_current_user)):
+async def graph_stats(
+    request: Request,
+    engagement_id: str = Depends(require_engagement_ownership),
+    user: AuthenticatedUser = Depends(get_current_user),
+):
     try:
         async with get_driver().session() as session:
             node_result = await session.run("""
                 MATCH (n)
-                WHERE n.org_id = $org_id
+                WHERE n.org_id = $org_id AND n.engagement_id = $engagement_id
                 RETURN labels(n)[0] AS type, count(n) AS count
                 ORDER BY count DESC
-            """, org_id=user.org_id)
+            """, org_id=user.org_id, engagement_id=engagement_id)
             nodes = {r["type"]: r["count"] async for r in node_result}
 
             rel_result = await session.run("""
                 MATCH (s)-[r]->(t)
-                WHERE s.org_id = $org_id AND t.org_id = $org_id
+                WHERE s.org_id = $org_id AND s.engagement_id = $engagement_id
+                  AND t.org_id = $org_id AND t.engagement_id = $engagement_id
                 RETURN type(r) AS type, count(r) AS count
                 ORDER BY count DESC
-            """, org_id=user.org_id)
+            """, org_id=user.org_id, engagement_id=engagement_id)
             relationships = {r["type"]: r["count"] async for r in rel_result}
 
             return {"nodes": nodes, "relationships": relationships}
@@ -334,7 +372,7 @@ async def get_paths(
     request: Request,
     source: str,
     target: str,
-    engagement_id: str = "",
+    engagement_id: str = Depends(require_engagement_ownership),
     user: AuthenticatedUser = Depends(get_current_user)
 ):
     try:
@@ -354,7 +392,7 @@ async def get_paths(
 async def plan_generate(
     request: Request,
     plan_request: PlanRequest,
-    engagement_id: str = "",
+    engagement_id: str = Depends(require_engagement_ownership),
     user: AuthenticatedUser = Depends(require_roles("org_admin", "operator"))
 ):
     try:
@@ -373,7 +411,7 @@ async def plan_generate(
 @limiter.limit("60/minute")
 async def gnn_status(
     request: Request,
-    engagement_id: str,
+    engagement_id: str = Depends(require_engagement_ownership),
     user: AuthenticatedUser = Depends(get_current_user),
 ):
     from gnn.init_gat import get_retrain_status
