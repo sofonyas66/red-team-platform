@@ -179,11 +179,17 @@ function Dashboard({ workspace, navigate }: { workspace: { email: string } | nul
        <div className="p-4 bg-red-500/10 border border-red-500/20 rounded-lg text-red-400 text-sm mb-6">{error}</div>
     ) : (
       <>
-        <div className="stats-grid">
-          <StatCard label="Total assets" value={totalAssets.toLocaleString()} trend="" detail="ingested nodes" icon={Database} color="green" />
-          <StatCard label="Relationships" value={totalRelationships.toLocaleString()} trend="" detail="graph edges" icon={GitBranch} color="purple" />
-          {/* Removed fake stats: Critical exposures, Risk score */}
-        </div>
+        {selectedEngagementId ? (
+          <div className="stats-grid">
+            <StatCard label="Total assets" value={totalAssets.toLocaleString()} trend="" detail="ingested nodes" icon={Database} color="green" />
+            <StatCard label="Relationships" value={totalRelationships.toLocaleString()} trend="" detail="graph edges" icon={GitBranch} color="purple" />
+            {/* Removed fake stats: Critical exposures, Risk score */}
+          </div>
+        ) : (
+          <div className="stats-grid">
+            <div className="p-10 text-center text-[#718096]">Select an engagement</div>
+          </div>
+        )}
 
         <div className="content-grid">
 

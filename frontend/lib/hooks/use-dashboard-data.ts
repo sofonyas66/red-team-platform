@@ -39,6 +39,7 @@ export function useEngagements() {
     setEngagementId(id);
     setSelectedIdState(id);
     queryClient.invalidateQueries({ queryKey: ['attack-paths'] });
+    queryClient.invalidateQueries({ queryKey: ['graph-stats'] });
   };
 
   const engagementsQuery = useQuery({
@@ -46,7 +47,15 @@ export function useEngagements() {
     queryFn: async () => {
       const response = await api.get<Engagement[]>('/engagements');
       const data = response.data || [];
-      if (data.length > 0 && !getEngagementId()) {
+      const currentId = getEngagementId();
+      if (currentId && !data.some(e => e.id === currentId)) {
+        setEngagementId(null);
+        setSelectedIdState(null);
+      } else if (data.length === 1 && !currentId) {
+        setEngagementId(data[0].id);
+        setSelectedIdState(data[0].id);
+      } else if (data.length > 0 && !currentId) {
+        // keep auto-select first engagement for backward compatibility when none selected
         setEngagementId(data[0].id);
         setSelectedIdState(data[0].id);
       }
