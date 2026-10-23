@@ -73,7 +73,7 @@ async def load_graph_data(org_id: str, engagement_id: str):
     async with TenantSession(org_id=org_id, engagement_id=engagement_id) as ts:
         emb_result = await ts.run("""
             MATCH (n)
-            WHERE n.embedding IS NOT NULL AND n.org_id = $org_id
+            WHERE n.embedding IS NOT NULL AND n.org_id = $org_id AND n.engagement_id = $engagement_id
             RETURN
                 coalesce(n.name, n.objectid, n.actor_id, n.technique_id) AS name,
                 n.embedding AS embedding,
@@ -87,7 +87,8 @@ async def load_graph_data(org_id: str, engagement_id: str):
         rel_result = await ts.run("""
             MATCH (a)-[r]->(b)
             WHERE a.embedding IS NOT NULL AND b.embedding IS NOT NULL
-              AND a.org_id = $org_id AND b.org_id = $org_id
+              AND a.org_id = $org_id AND a.engagement_id = $engagement_id
+              AND b.org_id = $org_id AND b.engagement_id = $engagement_id
             RETURN
                 coalesce(a.name, a.objectid, a.actor_id, a.technique_id) AS src,
                 coalesce(b.name, b.objectid, b.actor_id, b.technique_id) AS dst,
@@ -281,14 +282,49 @@ async def retrain_gat_background(org_id: str, engagement_id: str):
         got Future <Future pending> attached to a different loop
     because the driver's internal futures were owned by the main loop.
 
+    This version keeps all Neo4j async calls (via TenantSession) on the main
+    event loop, and only offloads the CPU-bound torch Node2Vec training
+    to a thread via asyncio.to_thread.
+
     Status is tracked in _retrain_status (in-memory only — not crash-safe).
     """
+    import asyncio
+    from gnn.embeddings import fetch_graph_from_neo4j, run_node2vec, store_embeddings_in_neo4j, build_pyg_data
+
     key = (org_id, engagement_id)
     _retrain_status[key] = {
         "status": "training",
         "started_at": datetime.utcnow().isoformat(),
     }
     try:
+        # Step 1: Generate Node2Vec embeddings
+        # 1a: Fetch graph from Neo4j (async, stays on main loop)
+        print(f"[GAT] Fetching graph for {org_id}/{engagement_id}...")
+        G, node_to_idx, idx_to_node = await fetch_graph_from_neo4j(org_id, engagement_id)
+        
+        if G.number_of_nodes() == 0:
+            raise RuntimeError(
+                f"No nodes found for org={org_id} engagement={engagement_id}. "
+                "Run ETL first."
+            )
+        print(f"[GAT] Fetched {G.number_of_nodes()} nodes, {G.number_of_edges()} edges")
+
+        # 1b: Build PyG data (sync, fast)
+        data = build_pyg_data(G, node_to_idx)
+
+        # 1c: Run Node2Vec (CPU-bound torch, offload to thread)
+        print(f"[GAT] Running Node2Vec for {org_id}/{engagement_id}...")
+        embeddings = await asyncio.to_thread(
+            run_node2vec, data
+        )
+        print(f"[GAT] Node2Vec complete for {org_id}/{engagement_id}")
+
+        # 1d: Store embeddings back to Neo4j (async, stays on main loop)
+        print(f"[GAT] Storing embeddings for {org_id}/{engagement_id}...")
+        await store_embeddings_in_neo4j(embeddings, idx_to_node, org_id, engagement_id)
+        print(f"[GAT] Embeddings stored for {org_id}/{engagement_id}")
+
+        # Step 2: Train GAT on embedded graph
         state = await initialize_gat(org_id, engagement_id, force_retrain=True)
         with _cache_lock:
             _gat_state_cache[key] = state
