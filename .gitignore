@@ -52,10 +52,9 @@ data/*.zip
 
 # Exceptions: these specific .pt files are the trained GAT model,
 # needed for portability to other machines — must be committed
-# (located at repo root level gnn/cache/ if they exist)
-!gnn/cache/path_gat.pt
-!gnn/cache/graph_tensors.pt
-!gnn/cache/node_mapping.json
+!backend/gnn/cache/path_gat.pt
+!backend/gnn/cache/graph_tensors.pt
+!backend/gnn/cache/node_mapping.json
 
 # Per-org trained model directories — large binaries, regenerated per engagement
 backend/gnn/cache/*/
