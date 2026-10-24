@@ -1,6 +1,11 @@
-import api, { getEngagementId, setEngagementId } from '../api-client';
+import api, { getEngagementId, setEngagementId, getAuthToken } from '../api-client';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { useState, useEffect } from 'react';
+
+function isAuthenticated(): boolean {
+  if (typeof window === 'undefined') return false;
+  return !!getAuthToken();
+}
 
 export interface Engagement {
   id: string;
@@ -26,7 +31,7 @@ export function useIngestionHistory() {
       if (!engagementId) return history;
       return history.filter((r: any) => String(r.engagement_id) === engagementId);
     },
-    enabled: true,
+    enabled: isAuthenticated(),
   });
 }
 
@@ -37,6 +42,7 @@ export function useWorkspace() {
       const response = await api.get('/me');
       return response.data;
     },
+    enabled: isAuthenticated(),
   });
 }
 
@@ -80,6 +86,7 @@ export function useEngagements() {
       }
       return data;
     },
+    enabled: isAuthenticated(),
   });
 
   return {
@@ -124,7 +131,7 @@ export function useTopPaths() {
       });
       return response.data || { paths: [], gat_status: 'not_started' as const };
     },
-    enabled: !!engagementId,
+    enabled: isAuthenticated() && !!engagementId,
   });
 }
 
@@ -163,7 +170,7 @@ export function useAttackPaths(source?: string, target?: string) {
       });
       return response.data || { paths: [], gat_status: 'not_started' as const };
     },
-    enabled: !!engagementId && !!source && !!target,
+    enabled: isAuthenticated() && !!engagementId && !!source && !!target,
   });
 }
 
@@ -221,7 +228,7 @@ export function useOverview() {
       });
       return response.data;
     },
-    enabled: !!engagementId,
+    enabled: isAuthenticated() && !!engagementId,
   });
 }
 
@@ -245,6 +252,6 @@ export function useGraphNodes() {
       });
       return response.data || { users: [], computers: [] };
     },
-    enabled: !!engagementId,
+    enabled: isAuthenticated() && !!engagementId,
   });
 }

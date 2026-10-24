@@ -11,7 +11,6 @@ RUN corepack enable && corepack prepare pnpm@latest --activate
 
 # Copy package files first for better caching
 COPY package.json pnpm-lock.yaml pnpm-workspace.yaml ./
-COPY .npmrc* ./
 
 # Install dependencies
 RUN pnpm install --frozen-lockfile
