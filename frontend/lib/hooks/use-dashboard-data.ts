@@ -89,6 +89,21 @@ export function useEngagements() {
   };
 }
 
+export interface TopPathsResponse {
+  paths: Array<{
+    source: string;
+    target: string;
+    hops: number;
+    nodes: string[];
+    rels: string[];
+    score: number | null;
+    label: string;
+    steps: number;
+    source_privileged: boolean;
+  }>;
+  gat_status: "not_started" | "training" | "ready" | "failed";
+}
+
 export function useTopPaths() {
   const [engagementId, setEngagementIdState] = useState<string | null>(() => getEngagementId());
   useEffect(() => {
@@ -100,17 +115,32 @@ export function useTopPaths() {
       window.removeEventListener('engagement-change', handler);
     };
   }, []);
-  return useQuery({
+  return useQuery<TopPathsResponse>({
     queryKey: ['top-paths', engagementId],
     queryFn: async () => {
-      if (!engagementId) return [];
+      if (!engagementId) return { paths: [], gat_status: 'not_started' as const };
       const response = await api.get('/paths/top', {
         params: { engagement_id: engagementId, limit: 10 }
       });
-      return response.data || [];
+      return response.data || { paths: [], gat_status: 'not_started' as const };
     },
     enabled: !!engagementId,
   });
+}
+
+export interface AttackPathsResponse {
+  paths: Array<{
+    source: string;
+    target: string;
+    hops: number;
+    nodes: string[];
+    rels: string[];
+    score: number | null;
+    label: string;
+    steps: number;
+    source_privileged: boolean;
+  }>;
+  gat_status: "not_started" | "training" | "ready" | "failed";
 }
 
 export function useAttackPaths(source?: string, target?: string) {
@@ -124,14 +154,14 @@ export function useAttackPaths(source?: string, target?: string) {
       window.removeEventListener('engagement-change', handler);
     };
   }, []);
-  return useQuery({
+  return useQuery<AttackPathsResponse>({
     queryKey: ['attack-paths', engagementId, source, target],
     queryFn: async () => {
-      if (!engagementId || !source || !target) return [];
+      if (!engagementId || !source || !target) return { paths: [], gat_status: 'not_started' as const };
       const response = await api.get('/paths', {
         params: { source, target, engagement_id: engagementId }
       });
-      return response.data || [];
+      return response.data || { paths: [], gat_status: 'not_started' as const };
     },
     enabled: !!engagementId && !!source && !!target,
   });
@@ -157,6 +187,7 @@ export interface OverviewResponse {
   }>;
   rel_type_breakdown: Record<string, number>;
   privileged_accounts: number;
+  gat_status: "not_started" | "training" | "ready" | "failed";
   recent_ingestion: Array<{
     filename: string;
     status: string;

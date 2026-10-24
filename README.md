@@ -154,7 +154,7 @@ CLI:
 
 - **Older CPUs (no AVX2):** `numpy` must be built from source with CPU dispatch disabled, and `torch` must come from the CPU-only index (`https://download.pytorch.org/whl/cpu`). Do not upgrade either casually.
 - **Retrieval (RAG) is optional.** Without `sentence-transformers`, campaign plans are still generated from graph-based threat actor matching and the LLM, and the plan is marked as generated without retrieval.
-- **Template fallback.** If no LLM is reachable, a templated plan is produced and labelled as such. It is never presented as AI-generated.
+- **No placeholder plans.** If the LLM provider is unreachable, plan generation returns a `503` error and saves nothing. The platform never substitutes a canned plan.
 - **Risk scores** from the GAT are relative values, not probabilities.
 
 ---

@@ -142,6 +142,7 @@ async def initialize_gat(
     org_id: str,
     engagement_id: str,
     force_retrain: bool = False,
+    gat_epochs: int = 200,
 ) -> dict:
     """
     Return a state dict for the given tenant+engagement.
@@ -197,7 +198,7 @@ async def initialize_gat(
     print(f"  x={x.shape}, edge_index={edge_index.shape}, edge_type={edge_type.shape}")
 
     model = PathGAT()
-    model = train_gat(model, x, edge_index, edge_type, edge_type_names)
+    model = train_gat(model, x, edge_index, edge_type, edge_type_names, epochs=gat_epochs)
 
     # Persist to disk
     torch.save(model.state_dict(), model_path)
@@ -289,7 +290,34 @@ async def retrain_gat_background(org_id: str, engagement_id: str):
     Status is tracked in _retrain_status (in-memory only — not crash-safe).
     """
     import asyncio
+    import os
     from gnn.embeddings import fetch_graph_from_neo4j, run_node2vec, store_embeddings_in_neo4j, build_pyg_data
+    import torch
+
+    # Limit torch intra-op parallelism to avoid oversubscribing on no-AVX2 CPUs
+    # Use a fixed smaller number (half of logical cores, min 2) rather than os.cpu_count()
+    # which would use all cores and cause contention / thrashing on this hardware.
+    try:
+        cpu_count = os.cpu_count() or 2
+        torch_threads = max(2, cpu_count // 2)
+        torch.set_num_threads(torch_threads)
+        print(f"[GAT] Set torch.set_num_threads({torch_threads}) (CPU count: {cpu_count})")
+    except Exception as e:
+        print(f"[GAT] Warning: could not set torch thread limit: {e}")
+
+    # Fast train mode via env var (demo only, default OFF)
+    fast_train = os.environ.get("RTAP_FAST_TRAIN") == "1"
+    if fast_train:
+        print("[GAT] FAST TRAIN MODE (env RTAP_FAST_TRAIN=1) -- reduced quality, for demo use only")
+        n2v_num_walks = 20
+        n2v_walk_length = 10
+        n2v_epochs = 4
+        gat_epochs = 60
+    else:
+        n2v_num_walks = 80
+        n2v_walk_length = 20
+        n2v_epochs = 8
+        gat_epochs = 200
 
     key = (org_id, engagement_id)
     _retrain_status[key] = {
@@ -313,9 +341,10 @@ async def retrain_gat_background(org_id: str, engagement_id: str):
         data = build_pyg_data(G, node_to_idx)
 
         # 1c: Run Node2Vec (CPU-bound torch, offload to thread)
-        print(f"[GAT] Running Node2Vec for {org_id}/{engagement_id}...")
+        print(f"[GAT] Running Node2Vec for {org_id}/{engagement_id} (walks={n2v_num_walks}, walk_len={n2v_walk_length}, epochs={n2v_epochs})...")
         embeddings = await asyncio.to_thread(
-            run_node2vec, data
+            run_node2vec, data,
+            n2v_num_walks, n2v_walk_length, n2v_epochs
         )
         print(f"[GAT] Node2Vec complete for {org_id}/{engagement_id}")
 
@@ -325,7 +354,7 @@ async def retrain_gat_background(org_id: str, engagement_id: str):
         print(f"[GAT] Embeddings stored for {org_id}/{engagement_id}")
 
         # Step 2: Train GAT on embedded graph
-        state = await initialize_gat(org_id, engagement_id, force_retrain=True)
+        state = await initialize_gat(org_id, engagement_id, force_retrain=True, gat_epochs=gat_epochs)
         with _cache_lock:
             _gat_state_cache[key] = state
             _gat_state_cache.move_to_end(key)
@@ -346,8 +375,24 @@ async def retrain_gat_background(org_id: str, engagement_id: str):
 
 
 def get_retrain_status(org_id: str, engagement_id: str) -> dict:
-    """Return the current retraining status for the given tenant+engagement."""
-    return _retrain_status.get((org_id, engagement_id), {"status": "not_started"})
+    """Return the current retraining status for the given tenant+engagement.
+
+    Priority:
+    1. In-memory _retrain_status entry (covers "training" / "failed" / "ready").
+    2. If no in-memory entry, check disk cache (model_path, tensors_path, mapping_path).
+       If all three exist, treat as "ready" (model already trained and cached).
+    3. Otherwise "not_started"."""
+    key = (org_id, engagement_id)
+    if key in _retrain_status:
+        return _retrain_status[key]
+    # No in-memory entry — check disk cache
+    cache_dir = CACHE_DIR / org_id / engagement_id
+    model_path = cache_dir / "path_gat.pt"
+    tensors_path = cache_dir / "graph_tensors.pt"
+    mapping_path = cache_dir / "node_mapping.json"
+    if model_path.exists() and tensors_path.exists() and mapping_path.exists():
+        return {"status": "ready"}
+    return {"status": "not_started"}
 
 
 # ═══════════════════════════════════════════════════════════════════════════

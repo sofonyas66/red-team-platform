@@ -67,3 +67,4 @@ token.json
 
 # CodeWhale agent session state
 .codewhale/
+backend/gnn/cache/

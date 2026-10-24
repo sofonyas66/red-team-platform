@@ -119,9 +119,18 @@ def build_pyg_data(G, node_to_idx):
     return data
 
 
-def run_node2vec(data, dimensions=128, walk_length=20, num_walks=80,
-                 p=1.0, q=1.0, batch_size=256, epochs=8, lr=0.01):
-    """Train Node2Vec using PyTorch Geometric."""
+def run_node2vec(data, num_walks=None, walk_length=None, epochs=None,
+                 dimensions=128, p=1.0, q=1.0, batch_size=256, lr=0.01):
+    """Train Node2Vec using PyTorch Geometric.
+    
+    If num_walks/walk_length/epochs are None, uses production defaults (80, 20, 8).
+    """
+    if num_walks is None:
+        num_walks = 80
+    if walk_length is None:
+        walk_length = 20
+    if epochs is None:
+        epochs = 8
     print(f"Running Node2Vec (dimensions={dimensions}, walk_length={walk_length}, "
           f"num_walks={num_walks}, epochs={epochs})...")
     

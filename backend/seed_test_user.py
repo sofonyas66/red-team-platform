@@ -1,3 +1,4 @@
+import os
 """
 Throwaway verification script — creates one Organization and one User
 so we can test the real login flow (correct password succeeds, wrong
@@ -17,7 +18,7 @@ sync_url = (DATABASE_URL or "").replace("+asyncpg", "")
 engine = create_engine(sync_url)
 
 TEST_EMAIL = "test-admin@example.com"
-TEST_PASSWORD = "CorrectHorseBatteryStaple123"
+TEST_PASSWORD = os.environ["RTAP_ADMIN_PW"]
 
 with Session(engine) as db:
     org = Organization(

@@ -480,9 +480,14 @@ async def upload_bloodhound(
         except IntegrityError:
             raise HTTPException(status_code=409, detail="Ingestion record already exists (unique constraint)")
 
-        from gnn.init_gat import invalidate_gat_state, retrain_gat_background
-        invalidate_gat_state(org_id=str(user.org_id), engagement_id=engagement_id_str)
-        background_tasks.add_task(retrain_gat_background, str(user.org_id), engagement_id_str)
+        from gnn.init_gat import invalidate_gat_state, retrain_gat_background, get_retrain_status
+        # Guard: skip queuing if a retrain is already in progress for this org+engagement
+        existing_status = get_retrain_status(str(user.org_id), engagement_id_str)
+        if existing_status.get("status") == "training":
+            print(f"[GAT] Retraining already in progress for {user.org_id}/{engagement_id_str}, skipping duplicate")
+        else:
+            invalidate_gat_state(org_id=str(user.org_id), engagement_id=engagement_id_str)
+            background_tasks.add_task(retrain_gat_background, str(user.org_id), engagement_id_str)
 
         return IngestResponse(
             status="success",
@@ -538,7 +543,12 @@ async def get_paths(
             })
         enriched = enrich_paths(norm_paths, src_map)
         enriched = sort_paths(enriched)
-        return enriched
+        from gnn.init_gat import get_retrain_status
+        gat_status = get_retrain_status(org_id, engagement_id)
+        return {
+            "paths": enriched,
+            "gat_status": gat_status.get("status", "not_started")
+        }
     except ImportError as e:
         raise HTTPException(
             status_code=503,
@@ -600,12 +610,12 @@ async def plan_generate(
             actor_name = "unknown"
             used_llm = True
             rag_used = False
-    except Exception:
-        from llm.planner import _templated_plan
-        plan_text = _templated_plan(paths)
-        actor_name = "unknown"
-        used_llm = False
-        rag_used = False
+    except Exception as e:
+        ex_class = type(e).__name__
+        raise HTTPException(
+            status_code=503,
+            detail=f"LLM provider unavailable: {ex_class}"
+        )
 
     top_path = paths[0]
     nodes_list = top_path.get("nodes", [])
@@ -853,11 +863,15 @@ async def get_overview(
         
         pipeline["paths_found"] = len(enriched_paths)
         
+        from gnn.init_gat import get_retrain_status
+        gat_status = get_retrain_status(org_id, engagement_id)
+        
         return {
             "engagement": {"id": engagement_id, "name": engagement_name},
             "asset_count": asset_count,
             "relationship_count": relationship_count,
             "top_paths": top_paths,
+            "gat_status": gat_status.get("status", "not_started"),
             "rel_type_breakdown": rel_breakdown,
             "privileged_accounts": privileged_accounts,
             "recent_ingestion": recent_ingestion,
@@ -890,7 +904,12 @@ async def get_top_paths(
                 source_privileged_map[src] = bool(rec and rec["c"] > 0)
         enriched = enrich_paths(raw_paths, source_privileged_map)
         enriched = sort_paths(enriched)
-        return enriched
+        from gnn.init_gat import get_retrain_status
+        gat_status = get_retrain_status(org_id, engagement_id)
+        return {
+            "paths": enriched,
+            "gat_status": gat_status.get("status", "not_started")
+        }
     except ImportError as e:
         raise HTTPException(
             status_code=503,

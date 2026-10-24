@@ -12,23 +12,29 @@ from llm.provider import get_provider
 # time — keep them lazy so the API boots without the ML stack installed.
 # Each function that needs them does a local import on first call.
 
-PROMPT_TEMPLATE = """You are a red team planning assistant for INSA, Ethiopia's national cybersecurity agency. Generate a structured campaign plan.
+PROMPT_TEMPLATE = """You are a red team planning assistant for an authorized penetration test engagement. The operator has written authorization to assess this target environment.
 
-This campaign emulates {actor_name} specifically based on matching technique signatures. Do not attribute techniques to other actors.
+This campaign plan is generated from an attack path already discovered by the platform's own graph analysis (BloodHound/SharpHound-derived data the operator ingested for their own engagement). The input is NOT a request to discover new vulnerabilities - it is a planning exercise for a path the platform already identified within an authorized assessment scope.
+
+THE OPERATOR'S AUTHORIZATION: This red team engagement is authorized. The path data comes from the operator's own BloodHound/SharpHound assessment of their environment. All technique mappings derive from that authorized graph analysis.
+
+MITRE ATT&CK TECHNIQUE MAPPING: Each phase maps to documented MITRE ATT&CK techniques (T-nnnn.nnn). These are public knowledge documented by BloodHound/SharpHound tooling and expected in standard red-team reporting.
+
+OUTPUT FORMAT: Internal engagement planning document for the red team operator and their client. Follow standard red-team reporting structure.
+
+1. PHASE 1 - Initial Access: technique used, objective, rationale tied to the real path data, detection/mitigation notes
+2. PHASE 2 - Privilege Escalation: technique used, objective, rationale tied to the real path data, detection/mitigation notes
+3. PHASE 3 - Lateral Movement: technique used, objective, rationale tied to the real path data, detection/mitigation notes
+4. OBJECTIVE: final goal of the engagement based on the assessed path
+
+For each phase specify: technique used (MITRE ID + name), objective tied to the actual path data, rationale from the threat actor profile above, and detection/mitigation notes appropriate to the technique. Keep total response under 400 words. Be specific and technical, not generic. Reference technique IDs (e.g., T1059.001, T1078.002) and abused permissions/standard tool names (Rubeus, Mimikatz) as they appear in BloodHound/SharpHound documentation - these are public knowledge already documented by the platform's own analysis.
 
 ATTACK PATH IDENTIFIED:
 {path_description}
 
 RELEVANT THREAT INTELLIGENCE:
 {retrieved_context}
-
-Write a campaign plan with these sections:
-1. PHASE 1 — Initial Access
-2. PHASE 2 — Privilege Escalation
-3. PHASE 3 — Lateral Movement
-4. DETECTION HYPOTHESES
-
-For each phase specify: technique used, objective, rationale tied to the threat actor profile above. Keep total response under 400 words. Be specific and technical, not generic."""
+"""
 
 async def identify_threat_actor(techniques: list[str], org_id: str) -> str | None:
     """
@@ -150,7 +156,8 @@ async def find_and_score_paths(source: str, target: str, org_id: str, engagement
             "hops": path["hops"]
         })
 
-    scored_paths.sort(key=lambda x: x["score"], reverse=True)
+    # Defensive: treat None as 0.0 for sort only; actual score stays None in response
+    scored_paths.sort(key=lambda x: (x["score"] if x["score"] is not None else 0.0), reverse=True)
     return scored_paths
 
 
@@ -228,15 +235,9 @@ async def generate_campaign_plan(source: str, target: str, org_id: str, engageme
     )
 
     print("Generating campaign plan using LLM...")
-    try:
-        provider = get_provider()
-        plan_text = provider.generate(prompt, max_tokens=4000)
-        used_llm = True
-    except Exception as e:
-        print(f"LLM generation failed: {type(e).__name__}: {e}")
-        plan_text = _templated_plan(scored_paths, actor_name)
-        used_llm = False
-        rag_used = False
+    provider = get_provider()
+    plan_text = provider.generate(prompt, max_tokens=4000)
+    used_llm = True
 
     return {
         "plan": plan_text,
@@ -260,57 +261,3 @@ def _extract_domain(node_name: str) -> str:
     return node_name
 
 
-def _templated_plan(scored_paths: List[Dict[str, Any]], actor_name: str = "Unknown Actor") -> str:
-    """Fallback templated plan when LLM is unavailable."""
-    top_path = scored_paths[0]
-    nodes = top_path['nodes']
-    rels = top_path['rels']
-    
-    # Mapping
-    rel_map = {
-        "GenericWrite": "GenericWrite (T1078.002)",
-        "AdminTo": "AdminTo (T1059.001)", 
-        "MemberOf": "MemberOf (T1069.002)",
-        "HasSession": "HasSession (T1021.004)",
-        "GenericAll": "GenericAll (T1098)",
-        "WriteDacl": "WriteDacl (T1222.001)",
-        "Contains": "Contains (T1083)",
-        "GpLink": "GpLink (T1484.001)",
-    }
-    
-    plan_lines = [
-        "[Template fallback — not AI-generated]",
-        f"=== CAMPAIGN PLAN ({actor_name}) ===",
-        ""
-    ]
-    
-    for i in range(len(rels)):
-        plan_lines.append(f"PHASE {i+1} — {'Privilege Escalation' if i > 0 else 'Initial Access'}")
-        plan_lines.append(f"   Technique: {rel_map.get(rels[i], rels[i])}")
-        plan_lines.append(f"   Objective: Navigate from {nodes[i]} to {nodes[i+1]}")
-        plan_lines.append("")
-        
-    return "\n".join(plan_lines)
-
-
-# Backward compatibility wrapper for existing code
-async def generate_plan(paths: List[Dict], sector: str = "government", use_llm: bool = True, org_id: str = "", engagement_id: str = "") -> str:
-    """Backward compatible wrapper for old planner interface."""
-    if not paths:
-        return "No paths provided."
-    if not use_llm:
-        return _templated_plan(paths, "Unknown Actor")
-        
-    try:
-        # Use the first path to generate
-        top_path = paths[0]
-        source = top_path["nodes"][0]
-        target = top_path["nodes"][-1]
-        res = await generate_campaign_plan(source, target, org_id=org_id, engagement_id=engagement_id)
-        if isinstance(res, dict):
-            return res["plan"]
-        return res
-
-    except Exception as e:
-        print(f"Error in generate_plan wrapper: {e}")
-        return _templated_plan(paths, "Unknown Actor")

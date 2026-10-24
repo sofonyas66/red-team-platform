@@ -184,7 +184,8 @@ function Dashboard({ workspace, navigate }: { workspace: { email: string } | nul
   }
 
   if (error || !overview) {
-    return <div className="p-4 bg-red-500/10 border border-red-500/20 rounded-lg text-red-400 text-sm mb-6">Failed to load overview data.</div>;
+    const detail = error?.response?.data?.detail || error?.message || 'Failed to load overview data.';
+    return <div className="p-4 bg-red-500/10 border border-red-500/20 rounded-lg text-red-400 text-sm mb-6">{detail}</div>;
   }
 
   const {
@@ -196,6 +197,7 @@ function Dashboard({ workspace, navigate }: { workspace: { email: string } | nul
     privileged_accounts = 0,
     recent_ingestion = [],
     pipeline = { ingested: false, last_ingested_at: null, paths_found: 0, threat_actors: false },
+    gat_status = 'not_started',
   } = overview;
 
   return (
@@ -282,6 +284,37 @@ function Dashboard({ workspace, navigate }: { workspace: { email: string } | nul
             ))}
           </div>
         </section>
+      )}
+
+      {/* GAT Training State Banner */}
+      {gat_status !== 'ready' && (
+        <div className="mb-4 p-3 bg-amber-500/10 border border-amber-500/30 rounded-lg flex items-center justify-between gap-4">
+          <div className="flex items-center gap-3">
+            <div className="animate-spin h-5 w-5 border-2 border-amber-500 border-t-transparent rounded-full" />
+            <div>
+              <div className="text-sm font-medium text-amber-300">Model is training for this engagement</div>
+              <div className="text-xs text-amber-400">Scores will appear shortly</div>
+            </div>
+          </div>
+          <Button variant="outline" size="sm" onClick={() => window.location.reload()} className="h-7">
+            <span className="flex items-center gap-1"><svg className="h-4 w-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M23 4v6h-6"/><path d="M1 20v-6h6"/><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"/></svg> Refresh</span>
+          </Button>
+        </div>
+      )}
+      {/* GAT Failed State */}
+      {gat_status === 'failed' && (
+        <div className="mb-4 p-3 bg-red-500/10 border border-red-500/30 rounded-lg flex items-center justify-between gap-4">
+          <div className="flex items-center gap-3">
+            <div className="text-red-400">✕</div>
+            <div>
+              <div className="text-sm font-medium text-red-300">Model training failed for this engagement</div>
+              <div className="text-xs text-red-400">Retry after checking ingestion completed successfully</div>
+            </div>
+          </div>
+          <Button variant="outline" size="sm" onClick={() => window.location.reload()} className="h-7">
+            <span className="flex items-center gap-1"><svg className="h-4 w-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M23 4v6h-6"/><path d="M1 20v-6h6"/><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"/></svg> Retry</span>
+          </Button>
+        </div>
       )}
 
       {/* Priority Attack Paths Table */}
@@ -437,12 +470,16 @@ function AttackPathsPage({ onNavigate }: { onNavigate: (page: PageKey) => void }
   const { selectedEngagementId, data: engagements = [] } = useEngagements();
   const selectedEng = engagements.find(e => e.id === selectedEngagementId);
   const { data: nodes = { users: [], computers: [] }, isLoading: nodesLoading } = useGraphNodes();
-  const { data: topPaths = [], isLoading: topLoading } = useTopPaths();
+  const { data: topPathsData, isLoading: topLoading, refetch: refetchTopPaths } = useTopPaths();
+  const topPaths = topPathsData?.paths || [];
+  const topGatStatus = topPathsData?.gat_status || 'not_started';
   const [source, setSource] = useState('');
   const [target, setTarget] = useState('');
   const [appliedSource, setAppliedSource] = useState('');
   const [appliedTarget, setAppliedTarget] = useState('');
-  const { data: paths = [], isLoading } = useAttackPaths(appliedSource || undefined, appliedTarget || undefined);
+  const { data: attackPathsData, isLoading, refetch: refetchAttackPaths } = useAttackPaths(appliedSource || undefined, appliedTarget || undefined);
+  const paths = attackPathsData?.paths || [];
+  const attackGatStatus = attackPathsData?.gat_status || 'not_started';
 
   // Load last query for this engagement when it changes
   useEffect(() => {
@@ -551,6 +588,36 @@ function AttackPathsPage({ onNavigate }: { onNavigate: (page: PageKey) => void }
           </div>
           <Button variant="outline" size="sm" onClick={() => onNavigate('Overview')}>Back to overview</Button>
         </div>
+        {/* GAT Training State Banner */}
+        {((appliedSource && appliedTarget && attackGatStatus !== 'ready') || (!appliedSource && !appliedTarget && topGatStatus !== 'ready')) && (
+          <div className="mb-4 p-3 bg-amber-500/10 border border-amber-500/30 rounded-lg flex items-center justify-between gap-4">
+            <div className="flex items-center gap-3">
+              <div className="animate-spin h-5 w-5 border-2 border-amber-500 border-t-transparent rounded-full" />
+              <div>
+                <div className="text-sm font-medium text-amber-300">Model is training for this engagement</div>
+                <div className="text-xs text-amber-400">Scores will appear shortly</div>
+              </div>
+            </div>
+            <Button variant="outline" size="sm" onClick={() => { refetchTopPaths(); refetchAttackPaths(); }} className="h-7">
+              <span className="flex items-center gap-1"><svg className="h-4 w-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M23 4v6h-6"/><path d="M1 20v-6h6"/><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"/></svg> Refresh</span>
+            </Button>
+          </div>
+        )}
+        {/* GAT Failed State */}
+        {((appliedSource && appliedTarget && attackGatStatus === 'failed') || (!appliedSource && !appliedTarget && topGatStatus === 'failed')) && (
+          <div className="mb-4 p-3 bg-red-500/10 border border-red-500/30 rounded-lg flex items-center justify-between gap-4">
+            <div className="flex items-center gap-3">
+              <div className="text-red-400">✕</div>
+              <div>
+                <div className="text-sm font-medium text-red-300">Model training failed for this engagement</div>
+                <div className="text-xs text-red-400">Retry after checking ingestion completed successfully</div>
+              </div>
+            </div>
+            <Button variant="outline" size="sm" onClick={() => { refetchTopPaths(); refetchAttackPaths(); }} className="h-7">
+              <span className="flex items-center gap-1"><svg className="h-4 w-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M23 4v6h-6"/><path d="M1 20v-6h6"/><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"/></svg> Retry</span>
+            </Button>
+          </div>
+        )}
         <div className="table-wrap">
           <table>
             <thead>
@@ -653,6 +720,8 @@ function CampaignPlansPage({ onNavigate }: { onNavigate: (page: PageKey) => void
   const { selectedEngagementId, data: engagements = [] } = useEngagements();
   const selectedEng = engagements.find(e => e.id === selectedEngagementId);
   const { data: nodes = { users: [], computers: [] }, isLoading: nodesLoading } = useGraphNodes();
+  const { data: topPathsData, isLoading: topLoading, refetch: refetchTopPaths } = useTopPaths();
+  const topGatStatus = topPathsData?.gat_status || 'not_started';
 
   const [source, setSource] = useState('');
   const [target, setTarget] = useState('');
@@ -813,6 +882,37 @@ function CampaignPlansPage({ onNavigate }: { onNavigate: (page: PageKey) => void
         </div>
       </section>
 
+      {/* GAT Training State Banner */}
+      {topGatStatus !== 'ready' && (
+        <div className="mb-4 p-3 bg-amber-500/10 border border-amber-500/30 rounded-lg flex items-center justify-between gap-4">
+          <div className="flex items-center gap-3">
+            <div className="animate-spin h-5 w-5 border-2 border-amber-500 border-t-transparent rounded-full" />
+            <div>
+              <div className="text-sm font-medium text-amber-300">Model is training for this engagement</div>
+              <div className="text-xs text-amber-400">Scores will appear shortly</div>
+            </div>
+          </div>
+          <Button variant="outline" size="sm" onClick={() => { refetchTopPaths(); }} className="h-7">
+            <span className="flex items-center gap-1"><svg className="h-4 w-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M23 4v6h-6"/><path d="M1 20v-6h6"/><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"/></svg> Refresh</span>
+          </Button>
+        </div>
+      )}
+      {/* GAT Failed State */}
+      {topGatStatus === 'failed' && (
+        <div className="mb-4 p-3 bg-red-500/10 border border-red-500/30 rounded-lg flex items-center justify-between gap-4">
+          <div className="flex items-center gap-3">
+            <div className="text-red-400">✕</div>
+            <div>
+              <div className="text-sm font-medium text-red-300">Model training failed for this engagement</div>
+              <div className="text-xs text-red-400">Retry after checking ingestion completed successfully</div>
+            </div>
+          </div>
+          <Button variant="outline" size="sm" onClick={() => { refetchTopPaths(); }} className="h-7">
+            <span className="flex items-center gap-1"><svg className="h-4 w-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M23 4v6h-6"/><path d="M1 20v-6h6"/><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"/></svg> Retry</span>
+          </Button>
+        </div>
+      )}
+
       {/* Generated Plan View */}
       {generatedPlan && (
         <section className="panel paths-panel mb-6">
@@ -822,15 +922,9 @@ function CampaignPlansPage({ onNavigate }: { onNavigate: (page: PageKey) => void
               <p>Generated at {new Date(generatedPlan.timestamp).toLocaleString()}</p>
             </div>
             <div className="flex items-center gap-2">
-              {generatedPlan.used_llm ? (
-                <span className="px-2 py-1 bg-emerald-500/20 text-emerald-400 border border-emerald-500/30 rounded text-xs font-semibold">
-                  AI generated
-                </span>
-              ) : (
-                <span className="px-2 py-1 bg-amber-500/20 text-amber-400 border border-amber-500/30 rounded text-xs font-semibold">
-                  Template fallback — not AI-generated
-                </span>
-              )}
+              <span className="px-2 py-1 bg-emerald-500/20 text-emerald-400 border border-emerald-500/30 rounded text-xs font-semibold">
+                AI generated
+              </span>
               <span className="px-2 py-1 bg-cyan-500/20 text-cyan-400 border border-cyan-500/30 rounded text-xs font-semibold">
                 RAG: {generatedPlan.rag_used ? 'on' : 'off'}
               </span>
