@@ -76,6 +76,20 @@ class Engagement(Base):
     organization: Mapped["Organization"] = relationship(back_populates="engagements")
 
 
+
+class Plan(Base):
+    __tablename__ = "plans"
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    org_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("organizations.id"), nullable=False)
+    engagement_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("engagements.id"), nullable=False)
+    source: Mapped[str] = mapped_column(String(255), nullable=False)
+    target: Mapped[str] = mapped_column(String(255), nullable=False)
+    rag_used: Mapped[bool] = mapped_column(Boolean, nullable=False)
+    used_llm: Mapped[bool] = mapped_column(Boolean, nullable=False)
+    path_json: Mapped[str] = mapped_column(String, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=datetime.utcnow, nullable=False)
+
 class IngestionRecord(Base):
     __tablename__ = "ingestion_records"
     __table_args__ = (
@@ -92,3 +106,4 @@ class IngestionRecord(Base):
     status: Mapped[IngestionStatus] = mapped_column(Enum(IngestionStatus), default=IngestionStatus.pending, nullable=False)
     ingested_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=datetime.utcnow, nullable=False)
     ingested_by: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("users.id"), nullable=False)
+

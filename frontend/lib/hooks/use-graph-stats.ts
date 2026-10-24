@@ -1,43 +1,38 @@
-import { useState, useEffect, useCallback } from 'react';
 import api, { getEngagementId } from '../api-client';
 import { GraphStats } from '../types/graph';
+import { useQuery } from '@tanstack/react-query';
 import { useAuth } from '../auth-context';
+import { useState, useEffect } from 'react';
 
 export function useGraphStats() {
-  const { token, isAuthenticated, isLoading: authLoading } = useAuth();
-  const [stats, setStats] = useState<GraphStats | null>(null);
-  const [isLoading, setIsLoading] = useState(true);
-  const [error, setError] = useState<string | null>(null);
-  const engagementId = getEngagementId();
-
-  const fetchStats = useCallback(async () => {
-    if (!isAuthenticated || !token) return;
-    if (!engagementId) {
-      setStats(null);
-      setIsLoading(false);
-      setError(null);
-      return;
-    }
-
-    try {
-      setIsLoading(true);
-      const { data } = await api.get<GraphStats>('/graph/stats', { params: { engagement_id: engagementId } });
-      setStats(data);
-      setError(null);
-    } catch (err: any) {
-      setError(err.response?.data?.detail || 'Failed to fetch graph stats');
-    } finally {
-      setIsLoading(false);
-    }
-  }, [isAuthenticated, token, engagementId]);
+  const { isAuthenticated, isLoading: authLoading } = useAuth();
+  const [engagementId, setEngagementIdState] = useState<string | null>(() => getEngagementId());
 
   useEffect(() => {
-    if (!authLoading && isAuthenticated) {
-      fetchStats();
-    } else if (!authLoading && !isAuthenticated) {
-      setIsLoading(false);
-    }
-  }, [authLoading, isAuthenticated, fetchStats]);
+    const handler = () => setEngagementIdState(getEngagementId());
+    window.addEventListener('storage', handler);
+    window.addEventListener('engagement-change', handler);
+    return () => {
+      window.removeEventListener('storage', handler);
+      window.removeEventListener('engagement-change', handler);
+    };
+  }, []);
 
-  return { stats, isLoading: isLoading || authLoading, error, refetch: fetchStats };
+  const query = useQuery<GraphStats, Error>({
+    queryKey: ['graph-stats', engagementId],
+    queryFn: async () => {
+      if (!engagementId) throw new Error('No engagement selected');
+      const { data } = await api.get<GraphStats>('/graph/stats', { params: { engagement_id: engagementId } });
+      return data;
+    },
+    enabled: !!isAuthenticated && !!engagementId && !authLoading,
+    staleTime: 0,
+  });
+
+  return {
+    stats: query.data ?? null,
+    isLoading: query.isLoading || authLoading,
+    error: query.error?.message || null,
+    refetch: query.refetch,
+  };
 }

@@ -3,15 +3,15 @@ api/main.py — FastAPI application for Red Team Planning Platform (Production-r
 """
 import os
 import uuid
-from fastapi import Form, Body
+from fastapi import Form
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
-from sqlalchemy import select
+from sqlalchemy import select, func
 import hashlib
 import tempfile
 import zipfile
 import shutil
-from typing import List, Dict
+from typing import List, Dict, Any
 from datetime import datetime
 from fastapi import FastAPI, HTTPException, UploadFile, File, Depends, Request, BackgroundTasks
 from fastapi.middleware.cors import CORSMiddleware
@@ -24,11 +24,12 @@ from contextlib import asynccontextmanager
 
 from graph.connection import get_driver
 from etl.bloodhound import ingest_bloodhound as ingest_data
-from llm.planner import find_and_score_paths, generate_campaign_plan
+from llm.planner import find_and_score_paths, generate_campaign_plan, find_top_paths_for_engagement
+
 from config import ALLOWED_ORIGINS
 from api.auth import (
-    get_current_user, require_roles, optional_auth, create_access_token,
-    authenticate_user, AuthenticatedUser, TokenData, PUBLIC_PATHS,
+    get_current_user, require_roles, create_access_token,
+    authenticate_user, AuthenticatedUser, PUBLIC_PATHS,
     _get_db_session,
 )
 from db.ingestion_ops import (
@@ -37,6 +38,7 @@ from db.ingestion_ops import (
     get_ingestion_record_by_hash,
     _engine as _ingestion_engine,
 )
+from api.path_utils import enrich_paths, sort_paths
 
 
 async def require_engagement_ownership(
@@ -129,6 +131,29 @@ class IngestResponse(BaseModel):
     skipped: bool = False
     message: str = ""
 
+
+class OverviewPath(BaseModel):
+    source: str
+    target: str
+    hops: int
+    steps: int
+    nodes: List[str]
+    rels: List[str]
+    score: float | None
+    label: str
+    source_privileged: bool
+
+
+class OverviewResponse(BaseModel):
+    engagement: Dict[str, str]
+    asset_count: int
+    relationship_count: int
+    top_paths: List[OverviewPath]
+    rel_type_breakdown: List[Dict[str, Any]]
+    privileged_accounts: int
+    recent_ingestion: List[Dict[str, Any]]
+    pipeline: Dict[str, Any]
+
 # =============================================================================
 # Middleware
 # =============================================================================
@@ -204,15 +229,36 @@ async def get_engagements(request: Request, user: AuthenticatedUser = Depends(ge
     from sqlalchemy.orm import Session
     from sqlalchemy import select
     with Session(_ingestion_engine) as session:
-        stmt = select(Engagement).where(Engagement.org_id == uuid.UUID(user.org_id))
+        stmt = select(Engagement).where(Engagement.org_id == uuid.UUID(user.org_id)).order_by(Engagement.created_at.desc())
         engagements = session.scalars(stmt).all()
-    return [
-        {"id": str(e.id), "name": e.name}
-        for e in engagements
-    ]
+    result = []
+    for e in engagements:
+        # Basic stats from Neo4j counts
+        node_count = 0
+        try:
+            from graph.connection import get_driver
+            async with get_driver().session() as neo:
+                res = await neo.run("MATCH (n) WHERE n.org_id = $org_id AND n.engagement_id = $engagement_id RETURN count(n) AS c", org_id=str(user.org_id), engagement_id=str(e.id))
+                rec = await res.single()
+                if rec:
+                    node_count = rec["c"]
+        except Exception:
+            node_count = 0
+        result.append({
+            "id": str(e.id),
+            "name": e.name,
+            "status": e.status.value,
+            "created_at": e.created_at.isoformat() if e.created_at else None,
+            "node_count": node_count,
+        })
+    return result
 
 class CreateEngagementRequest(BaseModel):
     name: str
+
+class UpdateEngagementRequest(BaseModel):
+    name: str
+    status: str | None = None
 
 @app.post("/engagements")
 @limiter.limit("5/minute")
@@ -225,6 +271,65 @@ async def create_engagement(request: Request, payload: CreateEngagementRequest, 
         session.commit()
         session.refresh(new)
     return {"id": str(new.id), "name": new.name}
+
+@app.patch("/engagements/{engagement_id}")
+@limiter.limit("5/minute")
+async def update_engagement(engagement_id: str, request: Request, payload: UpdateEngagementRequest, user: AuthenticatedUser = Depends(require_roles("org_admin", "operator"))):
+    from db.models import Engagement, EngagementStatus
+    from sqlalchemy.orm import Session
+    from sqlalchemy import select
+    with Session(_ingestion_engine) as session:
+        stmt = select(Engagement).where(Engagement.id == uuid.UUID(engagement_id), Engagement.org_id == uuid.UUID(user.org_id))
+        eng = session.scalar(stmt)
+        if not eng:
+            raise HTTPException(status_code=404, detail="Engagement not found")
+        eng.name = payload.name
+        if payload.status:
+            try:
+                eng.status = EngagementStatus(payload.status)
+            except Exception:
+                raise HTTPException(status_code=422, detail="Invalid status")
+        session.commit()
+        session.refresh(eng)
+    return {"id": str(eng.id), "name": eng.name, "status": eng.status.value}
+
+@app.delete("/engagements/{engagement_id}")
+@limiter.limit("5/minute")
+async def delete_engagement(engagement_id: str, request: Request, user: AuthenticatedUser = Depends(require_roles("org_admin"))):
+    from db.models import Engagement, IngestionRecord, Plan
+    from sqlalchemy.orm import Session
+    from sqlalchemy import select, delete
+
+    try:
+        eng_uuid = uuid.UUID(engagement_id)
+    except ValueError:
+        raise HTTPException(status_code=422, detail="Invalid engagement_id UUID")
+
+    with Session(_ingestion_engine) as session:
+        stmt = select(Engagement).where(Engagement.id == eng_uuid, Engagement.org_id == uuid.UUID(user.org_id))
+        eng = session.scalar(stmt)
+        if not eng:
+            raise HTTPException(status_code=404, detail="Engagement not found")
+
+        # Delete related Neo4j nodes first to avoid orphan data — do NOT swallow errors!
+        try:
+            from graph.connection import get_driver
+            async with get_driver().session() as neo:
+                await neo.run("MATCH (n) WHERE n.org_id = $org_id AND n.engagement_id = $engagement_id DETACH DELETE n", org_id=str(user.org_id), engagement_id=engagement_id)
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=f"Neo4j deletion failed: {e}")
+
+        # Delete plans first
+        session.execute(delete(Plan).where(Plan.engagement_id == eng_uuid))
+        
+        # Delete ingestion records referencing this engagement
+        session.execute(delete(IngestionRecord).where(IngestionRecord.engagement_id == eng_uuid))
+
+        # Delete engagement record
+        session.delete(eng)
+        session.commit()
+    return {"detail": "Engagement deleted"}
+
 
 @app.get("/health")
 @limiter.limit("60/minute")
@@ -266,6 +371,35 @@ async def graph_stats(
             relationships = {r["type"]: r["count"] async for r in rel_result}
 
             return {"nodes": nodes, "relationships": relationships}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/graph/nodes")
+@limiter.limit("60/minute")
+async def graph_nodes(
+    request: Request,
+    engagement_id: str = Depends(require_engagement_ownership),
+    user: AuthenticatedUser = Depends(get_current_user),
+):
+    try:
+        async with get_driver().session() as session:
+            users_result = await session.run("""
+                MATCH (u:User)
+                WHERE u.org_id = $org_id AND u.engagement_id = $engagement_id
+                RETURN DISTINCT u.name AS name
+                ORDER BY u.name
+            """, org_id=user.org_id, engagement_id=engagement_id)
+            users = [r["name"] async for r in users_result]
+
+            computers_result = await session.run("""
+                MATCH (c:Computer)
+                WHERE c.org_id = $org_id AND c.engagement_id = $engagement_id
+                RETURN DISTINCT c.name AS name
+                ORDER BY c.name
+            """, org_id=user.org_id, engagement_id=engagement_id)
+            computers = [r["name"] async for r in computers_result]
+
+            return {"users": users, "computers": computers}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 def _safe_extract_zip(zip_path: str, extract_to: str):
@@ -376,8 +510,35 @@ async def get_paths(
     user: AuthenticatedUser = Depends(get_current_user)
 ):
     try:
-        paths = await find_and_score_paths(source, target, org_id=str(user.org_id), engagement_id=engagement_id)
-        return paths
+        org_id = str(user.org_id)
+        raw_paths = await find_and_score_paths(source, target, org_id=org_id, engagement_id=engagement_id)
+        if not raw_paths:
+            return []
+        async with get_driver().session() as session:
+            privileged = False
+            r = await session.run(
+                "MATCH (u:User) WHERE u.org_id = $org_id AND u.engagement_id = $engagement_id AND (u.name = $src OR u.objectid = $src) AND u.admincount = true RETURN count(u) AS c",
+                org_id=org_id, engagement_id=engagement_id, src=source
+            )
+            rec = await r.single()
+            if rec and rec["c"] > 0:
+                privileged = True
+        # Build a map for enrichment
+        src_map = {p.get("source", source): privileged for p in raw_paths}
+        # Normalize raw paths to have source/target consistent
+        norm_paths = []
+        for p in raw_paths:
+            norm_paths.append({
+                "source": p.get("source", source),
+                "target": p.get("target", target),
+                "hops": p.get("hops", 0),
+                "nodes": p.get("nodes", []),
+                "rels": p.get("rels", []),
+                "score": p.get("score"),
+            })
+        enriched = enrich_paths(norm_paths, src_map)
+        enriched = sort_paths(enriched)
+        return enriched
     except ImportError as e:
         raise HTTPException(
             status_code=503,
@@ -388,27 +549,173 @@ async def get_paths(
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.post("/plan/generate")
-@limiter.limit("10/minute")
+@limiter.limit("5/minute")
 async def plan_generate(
     request: Request,
     plan_request: PlanRequest,
     engagement_id: str = Depends(require_engagement_ownership),
     user: AuthenticatedUser = Depends(require_roles("org_admin", "operator"))
 ):
-    try:
-        plan_text = await generate_campaign_plan(plan_request.source, plan_request.target, org_id=str(user.org_id), engagement_id=engagement_id)
-        return {"plan": plan_text, "generated_by": user.id, "timestamp": datetime.utcnow().isoformat()}
-    except ImportError as e:
-        raise HTTPException(
-            status_code=503,
-            detail=f"ML stack not available on this instance: {e}. "
-                   "Install torch, torch_geometric, and sentence-transformers to enable plan generation.",
-        )
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+    from db.models import Plan
+    from sqlalchemy.orm import Session
+    from db.ingestion_ops import _engine
+    import json
 
-@app.get("/gnn/status")
-@limiter.limit("60/minute")
+    org_id = str(user.org_id)
+
+    # 1. Check if source and target nodes exist in Neo4j for this org + engagement
+    from graph.connection import get_driver
+    async with get_driver().session() as neo:
+        r1 = await neo.run(
+            "MATCH (n) WHERE n.org_id = $org_id AND n.engagement_id = $engagement_id AND (n.name = $src OR n.objectid = $src) RETURN count(n) AS c",
+            org_id=org_id, engagement_id=engagement_id, src=plan_request.source
+        )
+        rec1 = await r1.single()
+        if not rec1 or rec1["c"] == 0:
+            raise HTTPException(status_code=404, detail=f"Source node '{plan_request.source}' not found in engagement")
+
+        r2 = await neo.run(
+            "MATCH (n) WHERE n.org_id = $org_id AND n.engagement_id = $engagement_id AND (n.name = $dst OR n.objectid = $dst) RETURN count(n) AS c",
+            org_id=org_id, engagement_id=engagement_id, dst=plan_request.target
+        )
+        rec2 = await r2.single()
+        if not rec2 or rec2["c"] == 0:
+            raise HTTPException(status_code=404, detail=f"Target node '{plan_request.target}' not found in engagement")
+
+    # 2. Check if an attack path exists
+    paths = await find_and_score_paths(plan_request.source, plan_request.target, org_id, engagement_id)
+    if not paths:
+        raise HTTPException(status_code=404, detail=f"No attack path found from '{plan_request.source}' to '{plan_request.target}'")
+
+    # 3. Generate campaign plan
+    try:
+        plan_res = await generate_campaign_plan(plan_request.source, plan_request.target, org_id=org_id, engagement_id=engagement_id)
+        if isinstance(plan_res, dict):
+            plan_text = plan_res["plan"]
+            actor_name = plan_res["actor_name"]
+            used_llm = plan_res["used_llm"]
+            rag_used = plan_res["rag_used"]
+        else:
+            plan_text = str(plan_res)
+            actor_name = "unknown"
+            used_llm = True
+            rag_used = False
+    except Exception:
+        from llm.planner import _templated_plan
+        plan_text = _templated_plan(paths)
+        actor_name = "unknown"
+        used_llm = False
+        rag_used = False
+
+    top_path = paths[0]
+    nodes_list = top_path.get("nodes", [])
+    rels_list = top_path.get("rels", [])
+    path_data = {
+        "nodes": nodes_list,
+        "rels": rels_list,
+        "hops": top_path.get("hops", len(rels_list)),
+        "steps": len(rels_list),
+        "label": f"{nodes_list[0]} -> {nodes_list[-1]}" if nodes_list else "",
+        "score": top_path.get("score"),
+        "plan": plan_text,
+        "matched_actor": actor_name
+    }
+
+    with Session(_engine) as session:
+        new_plan = Plan(
+            org_id=uuid.UUID(org_id),
+            engagement_id=uuid.UUID(engagement_id),
+            source=plan_request.source,
+            target=plan_request.target,
+            rag_used=rag_used,
+            used_llm=used_llm,
+            path_json=json.dumps(path_data),
+            created_at=datetime.utcnow()
+        )
+        session.add(new_plan)
+        session.commit()
+        session.refresh(new_plan)
+
+    return {
+        "id": str(new_plan.id),
+        "plan": plan_text,
+        "used_llm": used_llm,
+        "rag_used": rag_used,
+        "matched_actor": actor_name,
+        "timestamp": new_plan.created_at.isoformat()
+    }
+
+
+@app.get("/plans")
+@limiter.limit("30/minute")
+async def get_plans(
+    request: Request,
+    engagement_id: str,
+    user: AuthenticatedUser = Depends(get_current_user)
+):
+    from db.models import Plan
+    from sqlalchemy.orm import Session
+    from db.ingestion_ops import _engine
+    
+    # Ownership check
+    await require_engagement_ownership(engagement_id, user)
+    
+    with Session(_engine) as session:
+        stmt = select(Plan).where(
+            Plan.engagement_id == uuid.UUID(engagement_id),
+            Plan.org_id == uuid.UUID(user.org_id)
+        ).order_by(Plan.created_at.desc())
+        plans = session.scalars(stmt).all()
+        
+    return [
+        {
+            "id": str(p.id),
+            "source": p.source,
+            "target": p.target,
+            "created_at": p.created_at.isoformat(),
+            "rag_used": p.rag_used,
+            "used_llm": p.used_llm
+        }
+        for p in plans
+    ]
+
+@app.get("/plans/{plan_id}")
+@limiter.limit("30/minute")
+async def get_plan(
+    plan_id: str,
+    request: Request,
+    user: AuthenticatedUser = Depends(get_current_user)
+):
+    from db.models import Plan
+    from sqlalchemy.orm import Session
+    from db.ingestion_ops import _engine
+    import json
+
+    try:
+        pid = uuid.UUID(plan_id)
+    except ValueError:
+        raise HTTPException(status_code=422, detail="Invalid plan_id UUID")
+
+    with Session(_engine) as session:
+        plan = session.get(Plan, pid)
+        if not plan or plan.org_id != uuid.UUID(user.org_id):
+            raise HTTPException(status_code=404, detail="Plan not found")
+
+        try:
+            pj = json.loads(plan.path_json)
+        except Exception:
+            pj = plan.path_json
+
+        return {
+            "id": str(plan.id),
+            "source": plan.source,
+            "target": plan.target,
+            "rag_used": plan.rag_used,
+            "used_llm": plan.used_llm,
+            "path_json": pj,
+            "created_at": plan.created_at.isoformat()
+        }
+
 async def gnn_status(
     request: Request,
     engagement_id: str = Depends(require_engagement_ownership),
@@ -418,19 +725,189 @@ async def gnn_status(
     status = get_retrain_status(str(user.org_id), engagement_id)
     return {"org_id": str(user.org_id), "engagement_id": engagement_id, **status}
 
+
+@app.get("/overview")
+@limiter.limit("30/minute")
+async def get_overview(
+    request: Request,
+    engagement_id: str = Depends(require_engagement_ownership),
+    user: AuthenticatedUser = Depends(get_current_user),
+    limit: int = 10
+):
+    org_id = str(user.org_id)
+    
+    async with get_driver().session() as session:
+        # Engagement name
+        from db.models import Engagement
+        from sqlalchemy.orm import Session as DBSession
+        from sqlalchemy import select
+        import uuid as _uuid
+        with DBSession(_ingestion_engine) as db:
+            stmt = select(Engagement).where(
+                Engagement.id == _uuid.UUID(engagement_id),
+                Engagement.org_id == _uuid.UUID(org_id)
+            )
+            eng = db.scalar(stmt)
+            engagement_name = eng.name if eng else "Unknown"
+
+        # Asset count (all nodes)
+        r = await session.run(
+            "MATCH (n) WHERE n.org_id = $org_id AND n.engagement_id = $engagement_id RETURN count(n) AS c",
+            org_id=org_id, engagement_id=engagement_id
+        )
+        rec = await r.single()
+        asset_count = rec["c"] if rec else 0
+
+        # Relationship count (via endpoint nodes)
+        r = await session.run(
+            "MATCH (a)-[r]->(b) WHERE a.org_id = $org_id AND a.engagement_id = $engagement_id AND b.org_id = $org_id AND b.engagement_id = $engagement_id RETURN count(r) AS c",
+            org_id=org_id, engagement_id=engagement_id
+        )
+        rec = await r.single()
+        relationship_count = rec["c"] if rec else 0
+        
+        # Rel type breakdown (top 6 + other)
+        r = await session.run(
+            "MATCH (a)-[r]->(b) WHERE a.org_id = $org_id AND a.engagement_id = $engagement_id AND b.org_id = $org_id AND b.engagement_id = $engagement_id RETURN type(r) AS rel_type, count(r) AS c ORDER BY c DESC",
+            org_id=org_id, engagement_id=engagement_id
+        )
+        rel_counts = {}
+        async for record in r:
+            rel_counts[record["rel_type"]] = record["c"]
+        total_rels = sum(rel_counts.values())
+        top_rels = sorted(rel_counts.items(), key=lambda x: x[1], reverse=True)[:6]
+        rel_breakdown = [{"rel_type": k, "count": v} for k, v in top_rels]
+        other_count = total_rels - sum(v for _, v in top_rels)
+        if other_count > 0:
+            rel_breakdown.append({"rel_type": "other", "count": other_count})
+        
+        # Privileged accounts
+        r = await session.run(
+            "MATCH (u:User) WHERE u.org_id = $org_id AND u.engagement_id = $engagement_id AND u.admincount = true RETURN count(u) AS c",
+            org_id=org_id, engagement_id=engagement_id
+        )
+        rec = await r.single()
+        privileged_accounts = rec["c"] if rec else 0
+        
+        # Recent ingestion for THIS engagement
+        from db.models import IngestionRecord
+        from sqlalchemy import select as sql_select
+        from sqlalchemy.orm import Session as DBSession
+        with DBSession(_ingestion_engine) as db:
+            stmt = sql_select(IngestionRecord).where(
+                IngestionRecord.org_id == _uuid.UUID(org_id),
+                IngestionRecord.engagement_id == _uuid.UUID(engagement_id)
+            ).order_by(IngestionRecord.ingested_at.desc()).limit(5)
+            records = db.scalars(stmt).all()
+        recent_ingestion = [
+            {
+                "filename": r.filename,
+                "status": r.status.value,
+                "ingested_at": r.ingested_at.isoformat(),
+            }
+            for r in records
+        ]
+        
+        # Pipeline info
+        last_ingested = recent_ingestion[0]["ingested_at"] if recent_ingestion else None
+        # Threat actors check (global)
+        r = await session.run("MATCH (a:ThreatActor) RETURN count(a) AS c")
+        rec = await r.single()
+        threat_actor_count = rec["c"] if rec else 0
+
+        # Plans count
+        from db.models import Plan
+        with DBSession(_ingestion_engine) as db:
+            stmt = sql_select(func.count(Plan.id)).where(
+                Plan.org_id == _uuid.UUID(org_id),
+                Plan.engagement_id == _uuid.UUID(engagement_id)
+            )
+            plans_count = db.scalar(stmt) or 0
+
+        pipeline = {
+            "ingested": len(recent_ingestion) > 0,
+            "last_ingested_at": last_ingested,
+            "paths_found": 0,  # will update after paths
+            "threat_actors": threat_actor_count > 0,
+            "plans_count": plans_count
+        }
+        
+        # Top paths with scoring and classification
+        raw_paths = await find_top_paths_for_engagement(org_id, engagement_id, limit=limit * 3)
+        
+        # Build source_privileged map
+        source_privileged_map = {}
+        if raw_paths:
+            sources = list(set(p["source"] for p in raw_paths))
+            for src in sources:
+                r = await session.run(
+                    "MATCH (u:User) WHERE u.org_id = $org_id AND u.engagement_id = $engagement_id AND (u.name = $src OR u.objectid = $src) AND u.admincount = true RETURN count(u) AS c",
+                    org_id=org_id, engagement_id=engagement_id, src=src
+                )
+                rec = await r.single()
+                source_privileged_map[src] = bool(rec and rec["c"] > 0)
+        
+        enriched_paths = enrich_paths(raw_paths, source_privileged_map)
+        enriched_paths = sort_paths(enriched_paths)
+        top_paths = enriched_paths[:limit]
+        
+        pipeline["paths_found"] = len(enriched_paths)
+        
+        return {
+            "engagement": {"id": engagement_id, "name": engagement_name},
+            "asset_count": asset_count,
+            "relationship_count": relationship_count,
+            "top_paths": top_paths,
+            "rel_type_breakdown": rel_breakdown,
+            "privileged_accounts": privileged_accounts,
+            "recent_ingestion": recent_ingestion,
+            "pipeline": pipeline
+        }
+
+
+@app.get("/paths/top")
+@limiter.limit("30/minute")
+async def get_top_paths(
+    request: Request,
+    engagement_id: str = Depends(require_engagement_ownership),
+    user: AuthenticatedUser = Depends(get_current_user),
+    limit: int = 10
+):
+    try:
+        org_id = str(user.org_id)
+        raw_paths = await find_top_paths_for_engagement(org_id, engagement_id, limit=limit)
+        if not raw_paths:
+            return []
+        async with get_driver().session() as session:
+            source_privileged_map = {}
+            sources = list({p["source"] for p in raw_paths})
+            for src in sources:
+                r = await session.run(
+                    "MATCH (u:User) WHERE u.org_id = $org_id AND u.engagement_id = $engagement_id AND (u.name = $src OR u.objectid = $src) AND u.admincount = true RETURN count(u) AS c",
+                    org_id=org_id, engagement_id=engagement_id, src=src
+                )
+                rec = await r.single()
+                source_privileged_map[src] = bool(rec and rec["c"] > 0)
+        enriched = enrich_paths(raw_paths, source_privileged_map)
+        enriched = sort_paths(enriched)
+        return enriched
+    except ImportError as e:
+        raise HTTPException(
+            status_code=503,
+            detail=f"ML stack not available on this instance: {e}. "
+                   "Install torch and torch_geometric to enable path scoring.",
+        )
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
 @app.get("/actors")
 @limiter.limit("30/minute")
 async def get_actors(request: Request, user: AuthenticatedUser = Depends(get_current_user)):
     try:
         async with get_driver().session() as session:
-            result = await session.run("""
-                MATCH (a:ThreatActor)
-                OPTIONAL MATCH (a)-[:USES]->(t:Technique)
-                RETURN a.name AS actor_name,
-                       a.motivation AS motivation,
-                       a.sophistication AS sophistication,
-                       collect(DISTINCT t.name) AS techniques
-            """)
+            result = await session.run(
+                "MATCH (a:ThreatActor) OPTIONAL MATCH (a)-[:USES]->(t:Technique) RETURN a.name AS actor_name, a.motivation AS motivation, a.sophistication AS sophistication, collect(DISTINCT t.name) AS techniques"
+            )
             actors = [
                 {
                     "actor_name": record["actor_name"],

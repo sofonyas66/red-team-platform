@@ -56,7 +56,10 @@ export default function IngestPage() {
     try {
       const res = await api.get<Engagement[]>('/engagements')
       setEngagements(res.data)
-      if (res.data.length > 0 && !engagementId) {
+      const currentId = localStorage.getItem('engagement_id');
+      if (currentId && res.data.some(e => e.id === currentId)) {
+        setEngagementId(currentId);
+      } else if (res.data.length > 0) {
         setEngagementId(res.data[0].id)
       }
     } catch (err: any) {
@@ -335,7 +338,7 @@ export default function IngestPage() {
         </section>
       </div>
 
-      <section className="panel mt-4">
+      <section className="panel mt-4 hidden">
         <div className="panel-header">
           <div>
             <h2>Knowledge Base</h2>

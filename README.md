@@ -1,96 +1,171 @@
 # ETHIO-RTAP — Red Team Planning & Analysis Platform
 
-> **AI-Powered Attack Path Discovery, GNN Risk Scoring & Campaign Generation**
-> *Developed for the INSA Ethio Cyber Talent Program — Red Team Track*
+> **Attack path discovery, GNN risk scoring and campaign planning for Active Directory environments**
+> *Graduation project — INSA Ethio Cyber Talent Program, Red Team Track*
 
 ---
 
 ## Overview
 
-ETHIO-RTAP is an enterprise-grade red team planning platform that models Active Directory environments, discovers lateral movement attack paths, scores traversal risk using Graph Neural Networks, correlates paths with real-world threat actors, and generates actionable campaign playbooks using LLMs.
+ETHIO-RTAP automates the planning phase of a red team engagement. It ingests BloodHound/SharpHound Active Directory collections, builds a graph of the environment, finds attack paths to high-value targets, scores them with a Graph Attention Network (GAT), correlates them with Ethiopian threat intelligence (ETI-Core, STIX 2.1), and generates a structured campaign plan.
 
-## One-Command Setup
+It is a **planning and intelligence tool**: it recommends paths and plans, and never executes anything against a target. It is in the same category as BloodHound.
 
-We have simplified the setup process into a single command. The `Makefile` and `run.sh` script automatically detect your environment (Docker/Podman/Compose), handle dependency installation, and configure the infrastructure.
+Three things set it apart:
 
-### 1. Initial Setup
-Clone the repository and run the setup command:
+1. **ETI-Core** — a STIX 2.1 database of threat actors and techniques relevant to Ethiopia, used to tie paths to realistic adversaries.
+2. **GNN path scoring** — a GAT over the AD graph ranks candidate paths.
+3. **Offline / air-gapped deployment** — the stack runs locally (Neo4j, Postgres, Qdrant, optional Ollama), with no required cloud dependency.
+
+It is **multi-tenant**: each organization's data is isolated at every layer, so one platform can serve several customers.
+
+---
+
+## Team
+
+| Member | Role | Responsibilities |
+| :--- | :--- | :--- |
+| **Sofonyas** (GitHub: [sofonyas66](https://github.com/sofonyas66)) | Team Lead & Lead Developer | Architecture, backend (FastAPI, multi-tenant auth, Neo4j/Postgres), GNN scoring, LLM planner, CLI, frontend integration |
+| **[Team member 2 — full name]** | QA / Test Engineer | Test scenarios, verification of ingestion and tenant isolation, bug reports |
+| **[Team member 3 — full name]** | Threat Intelligence & Documentation | ETI-Core research, demo scenarios, documentation |
+
+---
+
+## Features
+
+| Area | Status |
+| :--- | :--- |
+| Multi-tenant auth (JWT with org and role claims), per-org engagement isolation | ✅ Verified |
+| BloodHound / SharpHound ingestion (ZIP or JSON) per engagement | ✅ Verified |
+| Attack path discovery with GAT scoring | ✅ Working |
+| Overview dashboard: pipeline status, relationship types, privileged accounts, ranked paths | ✅ Working |
+| Deterministic risk labels (High / Medium / Low) with explained steps | ✅ Working |
+| Threat actor correlation (ETI-Core) | ✅ Working |
+| Campaign plan generation (CLI) | ✅ Working |
+| Campaign plans in the web UI, saved per engagement | 🚧 In progress |
+| Threat actors page, Settings | 🚧 Planned |
+
+---
+
+## How risk is labelled
+
+Each candidate path gets a label from its structure, not from the model alone. The GAT score is shown as a secondary, relative value.
+
+- **Structural edges** (`MemberOf`, `Contains`, `GpLink`) cost an attacker nothing and are not counted as steps.
+- **Control edges** (`AdminTo`, `GenericAll`, `GenericWrite`, `WriteDacl`, `WriteOwner`, `Owns`, `AllExtendedRights`, `ForceChangePassword`, `AddMember`) give real control over the next object.
+
+| Label | Rule |
+| :--- | :--- |
+| **High** | 2 or fewer steps and every step is a control edge |
+| **Medium** | 3–4 steps, or 2 or fewer steps that include a non-control edge (e.g. `HasSession`, `CanRDP`) |
+| **Low** | everything else |
+
+Paths whose source account already holds privileged rights (`admincount`) are tagged **Already privileged**, since they are not real escalation.
+
+---
+
+## Architecture
+
+```
+┌──────────────────────┐     ┌──────────────────────────┐
+│ BloodHound/SharpHound│     │ STIX 2.1 Threat Intel    │
+│ AD export (.zip)     │     │ ETI-Core                 │
+└──────────┬───────────┘     └────────────┬─────────────┘
+           └──────────┬──────────────┬────┘
+                      ▼              ▼
+              ┌──────────────────────────┐        ┌──────────────┐
+              │  Neo4j graph (tenant-    │        │  Postgres    │
+              │  scoped by org_id +      │        │  orgs, users,│
+              │  engagement_id)          │        │  engagements,│
+              └────────┬─────────┬───────┘        │  plans       │
+                       │         │                └──────┬───────┘
+          ┌────────────┘         └──────────┐            │
+          ▼                                 ▼            │
+   ┌─────────────┐                    ┌─────────────┐    │
+   │ Node2Vec +  │                    │   Qdrant    │    │
+   │ GAT scoring │                    │ (optional   │    │
+   └──────┬──────┘                    │  RAG)       │    │
+          └──────────────┬────────────┴─────────────┘    │
+                         ▼                               │
+                ┌──────────────────┐                     │
+                │   LLM planner    │◄────────────────────┘
+                └────────┬─────────┘
+                         ▼
+          ┌──────────────────────────────┐
+          │ FastAPI  ·  rtap CLI  ·  Web │
+          └──────────────────────────────┘
+```
+
+### Tenant isolation
+
+- `org_id` is taken **only from the JWT**, never from the client.
+- Every graph node carries `org_id` and `engagement_id`; all Neo4j access goes through a `TenantSession` wrapper, and a CI script checks that no tenant node lacks these properties.
+- Engagement access is verified on every request: a malformed ID returns `422`, another organization's engagement returns `404`.
+- ETI-Core nodes (`ThreatActor`, `Technique`, `Sector`) are global by design.
+
+### Stack
+
+| Layer | Technology |
+| :--- | :--- |
+| Backend | Python, FastAPI, SQLAlchemy + Alembic |
+| Graph / data | Neo4j, Postgres, Qdrant |
+| ML | PyTorch (CPU), torch-geometric (GAT), Node2Vec, sentence-transformers (optional, for RAG) |
+| LLM | OpenAI-compatible provider layer (hosted APIs or local Ollama) |
+| Frontend | Next.js, TypeScript, pnpm |
+| CLI | Typer (`rtap`) |
+
+---
+
+## Getting started
+
+**Requirements:** Docker (Neo4j, Postgres, Qdrant), Python 3.14, Node.js with pnpm.
 
 ```bash
 git clone <repository-url>
 cd red-team-platform
 
-# This sets up venv, installs dependencies, and creates a .env file
-make install
+# 1. Infrastructure
+docker compose up -d
+
+# 2. Backend environment (core and ML dependencies are split in pyproject.toml)
+python -m venv .venv
+# install the core dependencies, then the ML extras if you want GNN scoring
+
+# 3. Configuration: create a .env with your database URLs, JWT secret
+#    and LLM provider settings (see backend/config.py for the variables)
+
+# 4. Database migrations
+alembic upgrade head
+
+# 5. API  (restart it after every backend change)
+PYTHONPATH=backend .venv/bin/python backend/start_api.py
+
+# 6. Web UI
+cd frontend && pnpm install && pnpm dev     # http://localhost:3000
 ```
 
-### 2. Configure Environment
-Edit the generated `.env` file to add your required API keys (Gemini, OpenAI, Anthropic, or OpenRouter):
+CLI:
 
 ```bash
-# Open your .env file
-nano .env
+./rtap --help
 ```
 
-### 3. Start Platform
-Use the `bootstrap` command to initialize databases, load threat intelligence, and configure embeddings in one go:
+### Notes
 
-```bash
-make bootstrap
-```
-
-### 4. Run API
-Start the FastAPI server:
-
-```bash
-make api
-```
+- **Older CPUs (no AVX2):** `numpy` must be built from source with CPU dispatch disabled, and `torch` must come from the CPU-only index (`https://download.pytorch.org/whl/cpu`). Do not upgrade either casually.
+- **Retrieval (RAG) is optional.** Without `sentence-transformers`, campaign plans are still generated from graph-based threat actor matching and the LLM, and the plan is marked as generated without retrieval.
+- **Template fallback.** If no LLM is reachable, a templated plan is produced and labelled as such. It is never presented as AI-generated.
+- **Risk scores** from the GAT are relative values, not probabilities.
 
 ---
 
-## Command Reference
+## Known limitations
 
-| Command | Description |
-| :--- | :--- |
-| `make bootstrap` | Start databases, load threat intel, initialize RAG/GNN. |
-| `make api` | Start the FastAPI backend server. |
-| `make up` | Start only the Neo4j/Qdrant containers. |
-| `make test` | Run health checks and test suite. |
-| `make clean` | Remove containers, volumes, and temporary files. |
+- The ingestor currently stores a subset of SharpHound properties (`name`, `samaccountname`, `enabled`, `admincount`, `description`, `operatingsystem`). Findings that need `hasspn`, `dontreqpreauth` or `unconstraineddelegation` are future work.
+- GAT scoring is trained per engagement on a small graph; use scores to rank paths, not as absolute risk.
 
 ---
 
-## Architecture & Pipeline
+## Security notice
 
-```
-┌──────────────────────┐     ┌──────────────────────────┐
-│ BloodHound/SharpHound│     │ STIX 2.1 Threat Intel    │
-│ AD Export (.zip)      │     │ Bundles (eti_core/)      │
-└──────────┬───────────┘     └────────────┬─────────────┘
-           │                              │
-           └──────────┬──────────────┬────┘
-                      ▼              ▼
-              ┌──────────────────────────┐
-              │       Neo4j Graph        │
-              └────────┬─────────┬───────┘
-                       │         │
-          ┌────────────┘         └────────────┐
-          ▼                                   ▼
-   ┌─────────────┐                     ┌─────────────┐
-   │  Node2Vec   │                     │   Qdrant    │
-   │  GNN Model  │                     │ Vector DB   │
-   └──────┬──────┘                     └──────┬──────┘
-          │                                   │
-          └────────────┬──────────────────────┘
-                       ▼
-              ┌──────────────────┐
-              │   LLM Planner    │
-              └────────┬─────────┘
-                       ▼
-              ┌──────────────────┐
-              │  rtap CLI / API  │
-              └──────────────────┘
-```
-
-## Security Notice
-This platform is designed exclusively for **authorized cybersecurity research** and red team emulation exercises. Ensure you have the appropriate permissions before modeling any production environment.
+This platform is intended exclusively for **authorized cybersecurity research** and red team planning. Obtain permission before modelling any production environment.

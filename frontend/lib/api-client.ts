@@ -42,6 +42,10 @@ export function setEngagementId(id: string | null): void {
   } else {
     localStorage.removeItem('engagement_id');
   }
+  // Notify React components listening for changes
+  try {
+    window.dispatchEvent(new CustomEvent('engagement-change'));
+  } catch {}
 }
 
 const api: AxiosInstance = axios.create({
