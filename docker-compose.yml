@@ -41,3 +41,13 @@ services:
     ports:
       - "7474:7474"
       - "7687:7687"
+
+  qdrant:
+    image: qdrant/qdrant:latest
+    ports:
+      - "6333:6333"
+    volumes:
+      - qdrant_data:/qdrant/storage
+
+volumes:
+  qdrant_data:

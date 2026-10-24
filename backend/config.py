@@ -30,6 +30,9 @@ LLM_BASE_URL = os.getenv("LLM_BASE_URL")
 LLM_API_KEY = os.getenv("LLM_API_KEY")
 LLM_MODEL_NAME = os.getenv("LLM_MODEL_NAME")
 
+# ── Qdrant ────────────────────────────────────────────────────────────────
+QDRANT_URL = os.getenv("QDRANT_URL", "http://localhost:6333")
+
 # ── CORS ──────────────────────────────────────────────────────────────────
 ALLOWED_ORIGINS = os.getenv("ALLOWED_ORIGINS", "http://localhost:3000").split(",")
 

@@ -25,9 +25,9 @@ It is **multi-tenant**: each organization's data is isolated at every layer, so 
 
 | Member | Role | Responsibilities |
 | :--- | :--- | :--- |
-| **Sofonyas** (GitHub: [sofonyas66](https://github.com/sofonyas66)) | Team Lead & Lead Developer | Architecture, backend (FastAPI, multi-tenant auth, Neo4j/Postgres), GNN scoring, LLM planner, CLI, frontend integration |
-| **[Team member 2 — full name]** | QA / Test Engineer | Test scenarios, verification of ingestion and tenant isolation, bug reports |
-| **[Team member 3 — full name]** | Threat Intelligence & Documentation | ETI-Core research, demo scenarios, documentation |
+| **Sofonyas** (GitHub: [sofonyas66](https://github.com/sofonyas66)) | Technical Lead & Graph ML Engineer  Architecture, FastAPI backend, multi-tenant authentication, Neo4j/Postgres, attack-path discovery, GNN scoring, CLI integration |
+| **Natnael** (GitHub: [natnaelCR7](https://github.com/natnaelCR7)) |  LLM & Data Ingestion Engineer  BloodHound/SharpHound ingestion, schema validation, data normalization, security data analysis, LLM context engineering, RAG pipeline, campaign-plan generation and evaluation |
+| **Azariyas** (GitHub: [AC0x84](https://github.com/AC0x84)) | Threat Intelligence Engineer  ETI-Core research, STIX 2.1 data modeling, threat actor and technique mapping, intelligence correlation, source validation and documentation |
 
 ---
 

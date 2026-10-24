@@ -18,6 +18,10 @@ sync_url = (DATABASE_URL or "").replace("+asyncpg", "")
 engine = create_engine(sync_url)
 
 TEST_EMAIL = "test-admin@example.com"
+
+if "RTAP_ADMIN_PW" not in os.environ:
+    raise RuntimeError("RTAP_ADMIN_PW environment variable must be set to run seed_test_user.py")
+
 TEST_PASSWORD = os.environ["RTAP_ADMIN_PW"]
 
 with Session(engine) as db:

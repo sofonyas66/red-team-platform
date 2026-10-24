@@ -1,6 +1,7 @@
 # Environment / secrets
 .env
 .env.*
+!.env.example
 
 # Python
 __pycache__/
@@ -51,20 +52,20 @@ data/*.zip
 
 # Exceptions: these specific .pt files are the trained GAT model,
 # needed for portability to other machines — must be committed
-gnn/cache/*/
+# (located at repo root level gnn/cache/ if they exist)
 !gnn/cache/path_gat.pt
 !gnn/cache/graph_tensors.pt
-**/gnn/cache/*/
+!gnn/cache/node_mapping.json
+
+# Per-org trained model directories — large binaries, regenerated per engagement
+backend/gnn/cache/*/
+
 *.bak
 *.before-fix
 *.pre-me
 *.incident-backup
 *.pid
 token.json
-*.pid
-token.json
-
 
 # CodeWhale agent session state
 .codewhale/
-backend/gnn/cache/
