@@ -123,7 +123,7 @@ Paths whose source account already holds privileged rights (`admincount`) are ta
 ### Quick start (one-shot)
 
 ```bash
-git clone <repository-url>
+git clone https://github.com/sofonyas66/red-team-platform.git
 cd red-team-platform
 ./bootstrap.sh
 ```
