@@ -133,7 +133,7 @@ The bootstrap script starts Docker services, creates a virtual environment, inst
 ### Manual setup
 
 ```bash
-git clone <repository-url>
+git clone https://github.com/sofonyas66/red-team-platform.git
 cd red-team-platform
 
 # 1. Infrastructure
