@@ -381,17 +381,35 @@ def get_retrain_status(org_id: str, engagement_id: str) -> dict:
     1. In-memory _retrain_status entry (covers "training" / "failed" / "ready").
     2. If no in-memory entry, check disk cache (model_path, tensors_path, mapping_path).
        If all three exist, treat as "ready" (model already trained and cached).
-    3. Otherwise "not_started"."""
+    3. Otherwise "not_started".
+
+    Returns status plus node_count, edge_count, trained_at from metadata.json when available."""
     key = (org_id, engagement_id)
-    if key in _retrain_status:
-        return _retrain_status[key]
-    # No in-memory entry — check disk cache
     cache_dir = CACHE_DIR / org_id / engagement_id
+    meta_path = cache_dir / "metadata.json"
+    meta = {}
+    if meta_path.exists():
+        try:
+            meta = json.loads(meta_path.read_text())
+        except Exception:
+            meta = {}
+    if key in _retrain_status:
+        status_data = dict(_retrain_status[key])
+        # Merge metadata fields if present
+        for k in ("node_count", "edge_count", "trained_at"):
+            if k in meta and k not in status_data:
+                status_data[k] = meta.get(k)
+        return status_data
+    # No in-memory entry — check disk cache
     model_path = cache_dir / "path_gat.pt"
     tensors_path = cache_dir / "graph_tensors.pt"
     mapping_path = cache_dir / "node_mapping.json"
     if model_path.exists() and tensors_path.exists() and mapping_path.exists():
-        return {"status": "ready"}
+        result = {"status": "ready"}
+        for k in ("node_count", "edge_count", "trained_at"):
+            if k in meta:
+                result[k] = meta.get(k)
+        return result
     return {"status": "not_started"}
 
 

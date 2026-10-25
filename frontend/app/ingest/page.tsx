@@ -13,7 +13,8 @@ import {
   GitBranch,
   Search,
   X,
-  Plus
+  Plus,
+  Brain
 } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import api from '@/lib/api-client'
@@ -46,10 +47,25 @@ export default function IngestPage() {
   const [uploading, setUploading] = useState(false)
   const [result, setResult] = useState<IngestResponse | null>(null)
   const [error, setError] = useState<string | null>(null)
+  const [gatStatus, setGatStatus] = useState<any>(null)
+  const [retraining, setRetraining] = useState(false)
 
   useEffect(() => {
     fetchEngagements()
   }, [])
+
+  useEffect(() => {
+    if (!engagementId) return
+    const fetchGatStatus = async () => {
+      try {
+        const res = await api.get(`/gnn_status?engagement_id=${engagementId}`)
+        setGatStatus(res.data)
+      } catch {}
+    }
+    fetchGatStatus()
+    const interval = setInterval(fetchGatStatus, 3000)
+    return () => clearInterval(interval)
+  }, [engagementId])
 
   const fetchEngagements = async () => {
     setLoadingEngagements(true)
@@ -97,6 +113,21 @@ export default function IngestPage() {
       setFile(e.target.files[0])
       setError(null)
       setResult(null)
+    }
+  }
+
+  const handleRetrain = async () => {
+    if (!engagementId) return
+    setRetraining(true)
+    setError(null)
+    try {
+      await api.post(`/gat/retrain?engagement_id=${engagementId}`)
+    } catch (err: any) {
+      const status = err.response?.status ? `[HTTP ${err.response.status}] ` : ''
+      const detail = err.response?.data?.detail || err.message || 'Retrain failed'
+      setError(`${status}${typeof detail === 'object' ? JSON.stringify(detail) : detail}`)
+    } finally {
+      setRetraining(false)
     }
   }
 
@@ -248,6 +279,41 @@ export default function IngestPage() {
               )}
             </Button>
 
+            <div className="pt-4 border-t border-[#1d2a39]/50">
+              <div className="flex items-center justify-between mb-3">
+                <h3 className="text-xs font-bold uppercase tracking-wider text-[#465668]">Graph Neural Network</h3>
+                <Button 
+                  size="sm" 
+                  variant="outline"
+                  disabled={!engagementId || retraining || gatStatus?.status === 'training'}
+                  onClick={handleRetrain}
+                >
+                  {retraining || gatStatus?.status === 'training' ? (
+                    <><Loader2 className="animate-spin mr-1" size={14} /> Training...</>
+                  ) : (
+                    <><Brain className="mr-1" size={14} /> Retrain Model</>
+                  )}
+                </Button>
+              </div>
+              <div className="p-3 bg-[#14202d] rounded-lg border border-[#1d2a39] text-xs space-y-1">
+                <div className="flex justify-between">
+                  <span className="text-[#718096]">Status</span>
+                  <span className={gatStatus?.status === 'ready' ? 'text-green-400' : gatStatus?.status === 'training' ? 'text-yellow-400' : 'text-[#718096]'}>
+                    {gatStatus?.status || 'unknown'}
+                  </span>
+                </div>
+                {gatStatus?.last_updated && (
+                  <div className="flex justify-between">
+                    <span className="text-[#718096]">Last updated</span>
+                    <span>{new Date(gatStatus.last_updated).toLocaleString()}</span>
+                  </div>
+                )}
+                {gatStatus?.error && (
+                  <div className="text-red-400">Error: {gatStatus.error}</div>
+                )}
+              </div>
+            </div>
+
             {error && (
               <div className="p-4 bg-red-500/10 border border-red-500/20 rounded-lg flex gap-3 items-start">
                 <AlertCircle className="text-red-500 shrink-0 mt-0.5" size={16} />
@@ -331,6 +397,66 @@ export default function IngestPage() {
                       ))}
                     </div>
                   </div>
+                )}
+              </div>
+            </div>
+          )}
+
+          {engagementId && gatStatus && (
+            <div className="mt-8 pt-6 border-t border-[#1d2a39]/50">
+              <h3 className="text-xs font-bold uppercase tracking-wider text-[#465668] mb-4">Model Training</h3>
+              <div className={cn(
+                "p-4 rounded-lg border",
+                gatStatus.status === 'ready' ? "bg-green-500/10 border-green-500/20" :
+                gatStatus.status === 'training' ? "bg-yellow-500/10 border-yellow-500/20" :
+                gatStatus.status === 'failed' ? "bg-red-500/10 border-red-500/20" :
+                "bg-[#14202d] border-[#1d2a39]"
+              )}>
+                <div className="flex items-center justify-between mb-3">
+                  <span className="text-xs text-[#718096]">Status</span>
+                  <span className={cn(
+                    "text-xs font-bold capitalize",
+                    gatStatus.status === 'ready' && 'text-green-400',
+                    gatStatus.status === 'training' && 'text-yellow-400',
+                    gatStatus.status === 'failed' && 'text-red-400'
+                  )}>
+                    {gatStatus.status || 'unknown'}
+                  </span>
+                </div>
+                <div className="grid grid-cols-2 gap-4">
+                  <div>
+                    <p className="text-[10px] font-bold text-[#718096] uppercase mb-1">Nodes</p>
+                    <p className="text-lg font-bold">{gatStatus.node_count?.toLocaleString() ?? '—'}</p>
+                  </div>
+                  <div>
+                    <p className="text-[10px] font-bold text-[#718096] uppercase mb-1">Edges</p>
+                    <p className="text-lg font-bold">{gatStatus.edge_count?.toLocaleString() ?? '—'}</p>
+                  </div>
+                </div>
+                {(gatStatus.trained_at || gatStatus.started_at || gatStatus.completed_at) && (
+                  <div className="mt-3 pt-3 border-t border-[#1d2a39]/50 text-xs text-[#718096] space-y-1">
+                    {gatStatus.trained_at && (
+                      <div className="flex justify-between">
+                        <span>Trained at</span>
+                        <span className="text-[#aab9c9]">{new Date(gatStatus.trained_at).toLocaleString()}</span>
+                      </div>
+                    )}
+                    {gatStatus.started_at && (
+                      <div className="flex justify-between">
+                        <span>Started at</span>
+                        <span className="text-[#aab9c9]">{new Date(gatStatus.started_at).toLocaleString()}</span>
+                      </div>
+                    )}
+                    {gatStatus.completed_at && (
+                      <div className="flex justify-between">
+                        <span>Completed at</span>
+                        <span className="text-[#aab9c9]">{new Date(gatStatus.completed_at).toLocaleString()}</span>
+                      </div>
+                    )}
+                  </div>
+                )}
+                {gatStatus.error && (
+                  <div className="mt-3 text-xs text-red-400">Error: {gatStatus.error}</div>
                 )}
               </div>
             </div>

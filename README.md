@@ -120,6 +120,18 @@ Paths whose source account already holds privileged rights (`admincount`) are ta
 
 **Requirements:** Docker (Neo4j, Postgres, Qdrant), Python 3.14, Node.js with pnpm.
 
+### Quick start (one-shot)
+
+```bash
+git clone <repository-url>
+cd red-team-platform
+./bootstrap.sh
+```
+
+The bootstrap script starts Docker services, creates a virtual environment, installs dependencies, runs migrations, seeds a test user, and optionally starts the API and frontend.
+
+### Manual setup
+
 ```bash
 git clone <repository-url>
 cd red-team-platform

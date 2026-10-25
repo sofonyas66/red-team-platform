@@ -726,6 +726,8 @@ async def get_plan(
             "created_at": plan.created_at.isoformat()
         }
 
+@app.get("/gnn_status")
+@limiter.limit("30/minute")
 async def gnn_status(
     request: Request,
     engagement_id: str = Depends(require_engagement_ownership),
@@ -734,6 +736,24 @@ async def gnn_status(
     from gnn.init_gat import get_retrain_status
     status = get_retrain_status(str(user.org_id), engagement_id)
     return {"org_id": str(user.org_id), "engagement_id": engagement_id, **status}
+
+
+@app.post("/gat/retrain")
+@limiter.limit("5/minute")
+async def retrain_gat(
+    request: Request,
+    background_tasks: BackgroundTasks,
+    engagement_id: str = Depends(require_engagement_ownership),
+    user: AuthenticatedUser = Depends(require_roles("org_admin", "operator")),
+):
+    from gnn.init_gat import invalidate_gat_state, retrain_gat_background, get_retrain_status
+    org_id = str(user.org_id)
+    existing_status = get_retrain_status(org_id, engagement_id)
+    if existing_status.get("status") == "training":
+        raise HTTPException(status_code=409, detail="Training already in progress for this engagement")
+    invalidate_gat_state(org_id=org_id, engagement_id=engagement_id)
+    background_tasks.add_task(retrain_gat_background, org_id, engagement_id)
+    return {"status": "queued", "org_id": org_id, "engagement_id": engagement_id}
 
 
 @app.get("/overview")
