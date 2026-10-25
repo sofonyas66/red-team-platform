@@ -125,6 +125,7 @@ Paths whose source account already holds privileged rights (`admincount`) are ta
 ```bash
 git clone https://github.com/sofonyas66/red-team-platform.git
 cd red-team-platform
+chmod +x bootstrap.sh
 ./bootstrap.sh
 ```
 
