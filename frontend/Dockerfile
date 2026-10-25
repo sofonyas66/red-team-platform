@@ -9,6 +9,9 @@ WORKDIR /app
 # Install pnpm
 RUN corepack enable && corepack prepare pnpm@latest --activate
 
+# Use faster npm registry mirror
+RUN pnpm config set registry https://registry.npmmirror.com
+
 # Copy package files first for better caching
 COPY package.json pnpm-lock.yaml pnpm-workspace.yaml ./
 
