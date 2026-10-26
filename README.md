@@ -4,7 +4,7 @@
 > *Graduation project — INSA Ethio Cyber Talent Program, Red Team Track*
 
 ---
-
+natnael video  - https://drive.google.com/file/d/1wel2JiX2ZMuDzvco991rNDnU_qfLLZg_/view?usp=sharing
 ## Overview
 
 ETHIO-RTAP automates the planning phase of a red team engagement. It ingests BloodHound/SharpHound Active Directory collections, builds a graph of the environment, finds attack paths to high-value targets, scores them with a Graph Attention Network (GAT), correlates them with Ethiopian threat intelligence (ETI-Core, STIX 2.1), and generates a structured campaign plan.
